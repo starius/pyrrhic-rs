@@ -1,6 +1,7 @@
 use std::{
     ffi::{CStr, CString},
     fs::{File, OpenOptions},
+    os::raw::c_char,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -19,9 +20,9 @@ extern "C" {
     fn exit(_: i32) -> !;
     fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: u64) -> *mut libc::c_void;
     fn memset(_: *mut libc::c_void, _: i32, _: u64) -> *mut libc::c_void;
-    fn strcpy(_: *mut i8, _: *const i8) -> *mut i8;
-    fn strcmp(_: *const i8, _: *const i8) -> i32;
-    fn strlen(_: *const i8) -> u64;
+    fn strcpy(_: *mut c_char, _: *const c_char) -> *mut c_char;
+    fn strcmp(_: *const c_char, _: *const c_char) -> i32;
+    fn strlen(_: *const c_char) -> u64;
 }
 
 pub(crate) const PYRRHIC_PRIME_BPAWN: u64 = 11695583624105689831;
@@ -227,16 +228,19 @@ unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
 static TB_MUTEX: Mutex<()> = Mutex::new(());
 static mut initialized: i32 = 0;
 static mut numPaths: i32 = 0;
-static mut pathString: *mut i8 = 0 as *const i8 as *mut i8;
-static mut paths: *mut *mut i8 = 0 as *const *mut i8 as *mut *mut i8;
-// unsafe fn open_tb(mut str: *const i8, mut suffix: *const i8) -> i32 {
-unsafe fn open_tb(mut str: *const i8, mut suffix: *const i8) -> Result<File, std::io::Error> {
+static mut pathString: *mut c_char = 0 as *const c_char as *mut c_char;
+static mut paths: *mut *mut c_char = 0 as *const *mut c_char as *mut *mut c_char;
+
+unsafe fn open_tb(
+    mut str: *const c_char,
+    mut suffix: *const c_char,
+) -> Result<File, std::io::Error> {
     let mut i: i32 = 0;
     i = 0;
     while i < numPaths {
         let path = CStr::from_ptr(*paths.offset(i as isize));
-        let str = CStr::from_ptr(str as *mut i8);
-        let suffix = CStr::from_ptr(suffix as *mut i8);
+        let str = CStr::from_ptr(str);
+        let suffix = CStr::from_ptr(suffix);
         let file = format!(
             "{}/{}{}",
             path.to_str().unwrap(),
@@ -282,10 +286,10 @@ pub(crate) static mut TB_NUM_WDL: i32 = 0;
 pub(crate) static mut TB_NUM_DTM: i32 = 0;
 
 pub(crate) static mut TB_NUM_DTZ: i32 = 0;
-static mut tbSuffix: [*const i8; 3] = [
-    b".rtbw\0" as *const u8 as *const i8,
-    b".rtbm\0" as *const u8 as *const i8,
-    b".rtbz\0" as *const u8 as *const i8,
+static mut tbSuffix: [*const c_char; 3] = [
+    b".rtbw\0" as *const u8 as *const c_char,
+    b".rtbm\0" as *const u8 as *const c_char,
+    b".rtbz\0" as *const u8 as *const c_char,
 ];
 const TB_MAGIC: [u32; 3] = [0x5d23e871, 0x88ac504b, 0xa50c66d7];
 
@@ -329,8 +333,8 @@ pub(crate) fn pyrrhic_pawn_start_square(colour: i32, sq: i32) -> bool {
     sq >> 3 == (if colour != 0 { 1 } else { 6 })
 }
 
-pub(crate) static pyrrhic_piece_to_char: [i8; 16] =
-    unsafe { *::core::mem::transmute::<&[u8; 16], &[i8; 16]>(b" PNBRQK  pnbrqk\0") };
+pub(crate) static pyrrhic_piece_to_char: [c_char; 16] =
+    unsafe { *::core::mem::transmute::<&[u8; 16], &[c_char; 16]>(b" PNBRQK  pnbrqk\0") };
 
 pub(crate) unsafe fn pyrrhic_pieces_by_type(
     pos: *const PyrrhicPosition,
@@ -355,7 +359,7 @@ pub(crate) unsafe fn pyrrhic_pieces_by_type(
     }
 }
 
-pub(crate) fn pyrrhic_char_to_piece_type(c: i8) -> i32 {
+pub(crate) fn pyrrhic_char_to_piece_type(c: c_char) -> i32 {
     let mut i: i32 = PYRRHIC_PAWN as i32;
     while i <= PYRRHIC_KING as i32 {
         if c as i32 == pyrrhic_piece_to_char[i as usize] as i32 {
@@ -1132,7 +1136,7 @@ pub(crate) unsafe fn tb_probe_root_wdl<E: EngineAdapter>(
     };
     root_probe_wdl::<E>(&pos, useRule50, results)
 }
-unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut i8, mut flip: i32) {
+unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut c_char, mut flip: i32) {
     let mut color: i32 = if flip != 0 {
         PYRRHIC_BLACK as i32
     } else {
@@ -1151,7 +1155,7 @@ unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut i8, mut flip: i
     }
     let fresh7 = str;
     str = str.offset(1);
-    *fresh7 = 'v' as i32 as i8;
+    *fresh7 = 'v' as i32 as c_char;
     let mut pt_0: i32 = PYRRHIC_KING as i32;
     while pt_0 >= PYRRHIC_PAWN as i32 {
         let mut i_0: i32 = popcount(pyrrhic_pieces_by_type(pos, color ^ 1, pt_0)) as i32;
@@ -1167,7 +1171,7 @@ unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut i8, mut flip: i
     str = str.offset(1);
     *fresh9 = 0;
 }
-unsafe fn test_tb(mut str: *const i8, mut suffix: *const i8) -> i32 {
+unsafe fn test_tb(mut str: *const c_char, mut suffix: *const c_char) -> i32 {
     let mut file = open_tb(str, suffix);
     if let Ok(file) = file {
         let size = file.metadata().unwrap().len();
@@ -1187,7 +1191,11 @@ unsafe fn test_tb(mut str: *const i8, mut suffix: *const i8) -> i32 {
         -1
     }
 }
-unsafe fn map_tb(mut name: *const i8, mut suffix: *const i8, mut mapping: *mut u64) -> *mut Mmap {
+unsafe fn map_tb(
+    mut name: *const c_char,
+    mut suffix: *const c_char,
+    mut mapping: *mut u64,
+) -> *mut Mmap {
     let mut file = open_tb(name, suffix);
     if file.is_err() {
         return std::ptr::null_mut();
@@ -1207,7 +1215,7 @@ unsafe fn add_to_hash(mut ptr: *mut BaseEntry, mut key: u64) {
     tbHash[idx as usize].key = key;
     tbHash[idx as usize].ptr = ptr;
 }
-unsafe fn init_tb(mut str: *mut i8) {
+unsafe fn init_tb(mut str: *const c_char) {
     if test_tb(str, tbSuffix[WDL as i32 as usize]) == 0 {
         return;
     }
@@ -1218,7 +1226,7 @@ unsafe fn init_tb(mut str: *mut i8) {
         i += 1;
     }
     let mut color: i32 = 0;
-    let mut s: *mut i8 = str;
+    let mut s: *const c_char = str;
     while *s != 0 {
         if *s as i32 == 'v' as i32 {
             color = 8;
@@ -1373,7 +1381,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             free_tb_entry(&mut *pawnEntry.offset(i_0 as isize) as *mut PawnEntry as *mut BaseEntry);
             i_0 += 1;
         }
-        pathString = std::ptr::null_mut::<i8>();
+        pathString = std::ptr::null_mut::<c_char>();
         numDtz = 0;
         numDtm = numDtz;
         numWdl = numDtm;
@@ -1387,7 +1395,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     }
     // pathString = malloc((strlen(p)).wrapping_add(1)) as *mut i8;
     // strcpy(pathString, p);
-    pathString = malloc(path.len() as u64 + 1) as *mut i8;
+    pathString = malloc(path.len() as u64 + 1) as *mut c_char;
     let cpath = CString::new(path.as_bytes()).unwrap();
 
     strcpy(pathString, cpath.as_ptr());
@@ -1408,8 +1416,8 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
         *pathString.offset(i_1 as isize) = 0;
         i_1 += 1;
     }
-    paths = malloc((numPaths as u64).wrapping_mul(::core::mem::size_of::<*mut i8>() as u64))
-        as *mut *mut i8;
+    paths = malloc((numPaths as u64).wrapping_mul(::core::mem::size_of::<*mut c_char>() as u64))
+        as *mut *mut c_char;
     let mut i_2: i32 = 0;
     let mut j: i32 = 0;
     while i_2 < numPaths {
@@ -1455,7 +1463,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - i_4) as usize] as u8 as char
         ))
         .unwrap();
-        init_tb(str.as_ptr() as *mut i8);
+        init_tb(str.as_ptr());
         i_4 += 1;
     }
     i_4 = 0;
@@ -1468,7 +1476,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                 pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - j_0) as usize] as u8 as char,
             ))
             .unwrap();
-            init_tb(str.as_ptr() as *mut i8);
+            init_tb(str.as_ptr());
             j_0 += 1;
         }
         i_4 += 1;
@@ -1483,7 +1491,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                 pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - j_0) as usize] as u8 as char,
             ))
             .unwrap();
-            init_tb(str.as_ptr() as *mut i8);
+            init_tb(str.as_ptr());
             j_0 += 1;
         }
         i_4 += 1;
@@ -1501,7 +1509,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - k) as usize] as u8 as char,
                 ))
                 .unwrap();
-                init_tb(str.as_ptr() as *mut i8);
+                init_tb(str.as_ptr());
                 k += 1;
             }
             j_0 += 1;
@@ -1521,7 +1529,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - k) as usize] as u8 as char,
                 ))
                 .unwrap();
-                init_tb(str.as_ptr() as *mut i8);
+                init_tb(str.as_ptr());
                 k += 1;
             }
             j_0 += 1;
@@ -1549,7 +1557,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr() as *mut i8);
+                        init_tb(str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1578,7 +1586,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr() as *mut i8);
+                        init_tb(str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1607,7 +1615,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr() as *mut i8);
+                        init_tb(str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1640,7 +1648,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr() as *mut i8);
+                            init_tb(str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -1675,7 +1683,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr() as *mut i8);
+                            init_tb(str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -1710,7 +1718,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr() as *mut i8);
+                            init_tb(str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -2419,7 +2427,7 @@ unsafe fn setup_pairs(
     (*d).offset = ((*d).offset).offset(-((*d).minLen as i32 as isize));
     d
 }
-unsafe fn init_table(be: *mut BaseEntry, str: *const i8, type_0: i32) -> bool {
+unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> bool {
     let mut mmap = map_tb(
         str,
         tbSuffix[type_0 as usize],
@@ -2745,7 +2753,7 @@ pub(crate) unsafe fn probe_table(
         // will be unlocked at the end of scope
         let lock = TB_MUTEX.lock().unwrap();
         if !(*be).ready[type_0 as usize].load(Ordering::Relaxed) {
-            let mut str: [i8; 16] = [0; 16];
+            let mut str: [c_char; 16] = [0; 16];
             prt_str(pos, str.as_mut_ptr(), ((*be).key != key) as i32);
             if !init_table(be, str.as_mut_ptr(), type_0) {
                 tbHash[hashIdx as usize].ptr = std::ptr::null_mut::<BaseEntry>();

@@ -12,7 +12,9 @@ As `pyrrhic-rs` is designed to be used within an existing engine, the user must 
 
 ```rust
 use cozy_chess::*;
+use pyrrhic_rs::EngineAdapter;
 
+#[derive(Clone)]
 struct CozyChessAdapter;
 
 impl EngineAdapter for CozyChessAdapter {

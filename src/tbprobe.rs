@@ -1541,7 +1541,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             k = 0;
             while k < 5 {
                 let str = CString::new(format!(
-                    "K{}{}v{}K",
+                    "K{}{}vK{}",
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - i_4) as usize] as u8 as char,
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - j_0) as usize] as u8 as char,
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - k) as usize] as u8 as char,

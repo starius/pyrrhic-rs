@@ -165,6 +165,26 @@ fn wdl_only_directory_does_not_claim_dtz_coverage() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn three_versus_two_material_is_discovered() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-three-v-two-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KRPvKR.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+
+    let tb = loop {
+        match TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()) {
+            Ok(tb) => break tb,
+            Err(TBError::AlreadyInitialized) => std::thread::yield_now(),
+            Err(error) => panic!("five-piece table was not discovered: {error:?}"),
+        }
+    };
+    assert_eq!(tb.max_pieces(), 5);
+    assert_eq!(unsafe { crate::tbprobe::TB_NUM_WDL }, 1);
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn absolute_windows_drive_path_loads() {

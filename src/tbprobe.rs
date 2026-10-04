@@ -267,12 +267,17 @@ unsafe fn open_tb(
 }
 fn close_tb(_file_handle: File) {}
 unsafe fn map_file(file: &File, mapping: *mut u64) -> *mut Mmap {
-    let file_size = file.metadata().unwrap().len();
-    *mapping = file_size;
-    let mut mmap = MmapOptions::new().map(file).expect("Failed to mmap file");
-    // leak the mmap onto the heap to be dropped later
-    let mmap_ptr = Box::new(mmap);
-    Box::leak(mmap_ptr) as *mut Mmap
+    let Ok(metadata) = file.metadata() else {
+        return std::ptr::null_mut();
+    };
+    if metadata.len() < 5 {
+        return std::ptr::null_mut();
+    }
+    let Ok(mmap) = MmapOptions::new().map(file) else {
+        return std::ptr::null_mut();
+    };
+    *mapping = metadata.len();
+    Box::into_raw(Box::new(mmap))
 }
 unsafe fn unmap_file(data: *mut Mmap, _size: u64) {
     if data.is_null() {
@@ -1213,7 +1218,10 @@ unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut c_char, mut fli
 unsafe fn test_tb(mut str: *const c_char, mut suffix: *const c_char) -> i32 {
     let mut file = open_tb(str, suffix);
     if let Ok(file) = file {
-        let size = file.metadata().unwrap().len();
+        let Ok(metadata) = file.metadata() else {
+            return -1;
+        };
+        let size = metadata.len();
         close_tb(file);
         if size & 63 != 16 {
             let file_path = format!(
@@ -2473,6 +2481,10 @@ unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> boo
 
     let mut data = (*mmap).as_ptr() as *mut u8;
 
+    if (&*mmap).len() < 5 {
+        unmap_file(mmap, (*be).mapping[type_0 as usize]);
+        return false;
+    }
     if read_le_u32(data as *mut libc::c_void) != TB_MAGIC[type_0 as usize] {
         eprintln!("Corrupted table");
         unmap_file(mmap, (*be).mapping[type_0 as usize]);

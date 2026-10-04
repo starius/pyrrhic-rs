@@ -282,6 +282,52 @@ fn concurrent_failed_lazy_probes_do_not_mutate_material_hash() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+fn probe_wdl_for_board(
+    tb: &TableBases<CozyChessAdapter>,
+    board: &Board,
+) -> Result<WdlProbeResult, TBError> {
+    tb.probe_wdl(
+        board.colors(cozy_chess::Color::White).0,
+        board.colors(cozy_chess::Color::Black).0,
+        board.pieces(Piece::King).0,
+        board.pieces(Piece::Queen).0,
+        board.pieces(Piece::Rook).0,
+        board.pieces(Piece::Bishop).0,
+        board.pieces(Piece::Knight).0,
+        board.pieces(Piece::Pawn).0,
+        0,
+        board.side_to_move() == cozy_chess::Color::White,
+    )
+}
+
+#[test]
+fn short_header_after_discovery_returns_probe_failure() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-short-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    file.set_len(4).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn missing_file_after_discovery_returns_probe_failure() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("KQvK.rtbw");
+    std::fs::File::create(&file).unwrap().set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";

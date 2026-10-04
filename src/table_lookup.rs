@@ -451,6 +451,10 @@ pub(crate) fn probe_table_value(
     }
     let decoded = decode_pair(backing, pair, index).map_err(|_| LookupError)?;
     if !dtz {
+        // Reject impossible leaves before capture search can discard their score.
+        if decoded[0] > 4 {
+            return Err(LookupError);
+        }
         return Ok(TableProbeValue::Value(i32::from(decoded[0]) - 2));
     }
     let wdl_index = usize::try_from(wdl + 2).map_err(|_| LookupError)?;

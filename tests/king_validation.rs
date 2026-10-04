@@ -234,3 +234,54 @@ fn ci_compact_tables_root_array_saturates_at_maximum_clock() {
     assert_eq!(at_254.num_moves, at_255.num_moves);
     assert_eq!(at_254.moves, at_255.moves);
 }
+
+// A malformed successor WDL leaf must fail the public probe even if capture
+// search would otherwise discard its out-of-range score. This direct probe
+// contract cannot be expressed as a TSV move fixture.
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_reject_invalid_successor_wdl() {
+    let source = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let destination = std::env::temp_dir().join(format!(
+        "pyrrhic-invalid-wdl-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::copy(
+        std::path::Path::new(&source).join("KRvKP.rtbw"),
+        destination.join("KRvKP.rtbw"),
+    )
+    .unwrap();
+
+    // A complete 80-byte constant KRvK WDL table with an invalid leaf 5.
+    let mut corrupt = [0u8; 80];
+    corrupt[..4].copy_from_slice(&0x5d23_e871_u32.to_le_bytes());
+    corrupt[4] = 1;
+    corrupt[5..9].copy_from_slice(&[0, 0x6e, 0xe6, 0x44]);
+    corrupt[10..14].copy_from_slice(&[0x80, 4, 0x80, 5]);
+    std::fs::write(destination.join("KRvK.rtbw"), corrupt).unwrap();
+
+    let tables = TableBases::<Adapter>::new(destination.to_str().unwrap()).unwrap();
+    // 7k/1p6/8/8/8/8/1R6/K7 w - - 0 1: Rxb7 reaches corrupt KRvK.
+    assert_eq!(
+        tables.probe_wdl(
+            bit(0) | bit(9),
+            bit(49) | bit(63),
+            bit(0) | bit(63),
+            0,
+            bit(9),
+            0,
+            0,
+            bit(49),
+            0,
+            true,
+        ),
+        Err(TBError::ProbeFailed)
+    );
+    drop(tables);
+    std::fs::remove_dir_all(destination).unwrap();
+}

@@ -1,0 +1,154 @@
+use cozy_chess::{
+    get_bishop_moves, get_king_moves, get_knight_moves, get_pawn_attacks, get_rook_moves, BitBoard,
+    Color as ChessColor, Square,
+};
+use pyrrhic_rs::{Color, DtzProbeValue, EngineAdapter, TBError, TableBases, WdlProbeResult};
+
+#[derive(Clone)]
+struct Adapter;
+
+impl EngineAdapter for Adapter {
+    fn pawn_attacks(color: Color, square: u64) -> u64 {
+        let color = if color == Color::White {
+            ChessColor::White
+        } else {
+            ChessColor::Black
+        };
+        get_pawn_attacks(Square::index(square as usize), color).0
+    }
+
+    fn knight_attacks(square: u64) -> u64 {
+        get_knight_moves(Square::index(square as usize)).0
+    }
+
+    fn bishop_attacks(square: u64, occupied: u64) -> u64 {
+        get_bishop_moves(Square::index(square as usize), BitBoard(occupied)).0
+    }
+
+    fn rook_attacks(square: u64, occupied: u64) -> u64 {
+        get_rook_moves(Square::index(square as usize), BitBoard(occupied)).0
+    }
+
+    fn queen_attacks(square: u64, occupied: u64) -> u64 {
+        Self::bishop_attacks(square, occupied) | Self::rook_attacks(square, occupied)
+    }
+
+    fn king_attacks(square: u64) -> u64 {
+        get_king_moves(Square::index(square as usize)).0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Position {
+    white: u64,
+    black: u64,
+    kings: u64,
+    queens: u64,
+    turn: bool,
+}
+
+const fn bit(square: u32) -> u64 {
+    1u64 << square
+}
+
+impl Position {
+    // 7k/8/8/8/8/8/8/1Q2K3 w - - 0 1
+    const WITNESS: Self = Self {
+        white: bit(1) | bit(4),
+        black: bit(63),
+        kings: bit(4) | bit(63),
+        queens: bit(1),
+        turn: true,
+    };
+
+    // 2k5/8/8/8/8/8/8/2Q1K3 w - - 0 1
+    const ATTACKED_KING: Self = Self {
+        white: bit(2) | bit(4),
+        black: bit(58),
+        kings: bit(4) | bit(58),
+        queens: bit(2),
+        turn: true,
+    };
+
+    // 7k/6Q1/8/8/8/8/8/K7 w - - 0 1: the old capture path removed h8.
+    const CAPTURABLE_KING: Self = Self {
+        white: bit(0) | bit(54),
+        black: bit(63),
+        kings: bit(0) | bit(63),
+        queens: bit(54),
+        turn: true,
+    };
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    Wdl,
+    Dtz,
+    Root,
+}
+
+fn probe(tb: &TableBases<Adapter>, pos: Position, kind: Probe) -> Result<i32, TBError> {
+    match kind {
+        Probe::Wdl => tb
+            .probe_wdl(
+                pos.white, pos.black, pos.kings, pos.queens, 0, 0, 0, 0, 0, pos.turn,
+            )
+            .map(|value| match value {
+                WdlProbeResult::Win => 1,
+                WdlProbeResult::Loss => -1,
+                _ => 0,
+            }),
+        Probe::Dtz => tb.probe_dtz(
+            pos.white, pos.black, pos.kings, pos.queens, 0, 0, 0, 0, 0, pos.turn,
+        ),
+        Probe::Root => tb
+            .probe_root(
+                pos.white, pos.black, pos.kings, pos.queens, 0, 0, 0, 0, 0, 0, pos.turn,
+            )
+            .map(|result| match result.root {
+                DtzProbeValue::DtzResult(root) if root.wdl == WdlProbeResult::Win => 1,
+                DtzProbeValue::DtzResult(root) if root.wdl == WdlProbeResult::Loss => -1,
+                _ => 0,
+            }),
+    }
+}
+
+// This tests direct API failure and cache isolation, which cannot be expressed
+// as a TSV assertion about Ember's chosen root move.
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_reject_attacked_opposing_king_without_poisoning_tables() {
+    let path = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    for kind in [Probe::Wdl, Probe::Dtz, Probe::Root] {
+        for warm in [false, true] {
+            let tb = TableBases::<Adapter>::new(&path).unwrap();
+            if warm {
+                assert_eq!(probe(&tb, Position::WITNESS, Probe::Wdl), Ok(1));
+                assert_eq!(probe(&tb, Position::WITNESS, Probe::Dtz), Ok(13));
+            }
+            for invalid in [Position::ATTACKED_KING, Position::CAPTURABLE_KING] {
+                assert_eq!(probe(&tb, invalid, kind), Err(TBError::ProbeFailed));
+                let expected = match kind {
+                    Probe::Wdl | Probe::Root => 1,
+                    Probe::Dtz => 13,
+                };
+                assert_eq!(probe(&tb, Position::WITNESS, kind), Ok(expected));
+            }
+        }
+    }
+}
+
+// The side to move may be in check; the API must still probe it normally.
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_accept_legal_side_to_move_in_check() {
+    let path = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let tb = TableBases::<Adapter>::new(path).unwrap();
+    let checked = Position {
+        turn: false,
+        ..Position::ATTACKED_KING
+    };
+    assert_eq!(probe(&tb, checked, Probe::Wdl), Ok(-1));
+    assert!(probe(&tb, checked, Probe::Dtz).unwrap() < 0);
+    assert_eq!(probe(&tb, checked, Probe::Root), Ok(-1));
+}

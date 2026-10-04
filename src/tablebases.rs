@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    engine_adapter::{EngineAdapter, Piece},
+    engine_adapter::{Color, EngineAdapter, Piece},
     tbprobe::{self, tb_init, tb_probe_root, tb_probe_wdl, StateOwner},
 };
 
@@ -94,7 +94,7 @@ static ROOT_PROBE_MUTEX: Mutex<()> = Mutex::new(());
 /// The caller may pass an arbitrary position through this safe API.
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn valid_probe_position(
+fn valid_probe_position<E: EngineAdapter>(
     white: u64,
     black: u64,
     kings: u64,
@@ -137,6 +137,23 @@ fn valid_probe_position(
         return false;
     }
 
+    // A legal chess position can have the side to move in check, but the
+    // opposing king cannot already be attacked. Otherwise the translated
+    // capture generator may remove that king and index a nonexistent square.
+    let (attacker, target_king, reverse_pawn_color) = if turn {
+        (white, black_king, Color::Black)
+    } else {
+        (black, white_king, Color::White)
+    };
+    let target_king = u64::from(target_king);
+    if E::rook_attacks(target_king, occupied) & attacker & (rooks | queens) != 0
+        || E::bishop_attacks(target_king, occupied) & attacker & (bishops | queens) != 0
+        || E::knight_attacks(target_king) & attacker & knights != 0
+        || E::pawn_attacks(reverse_pawn_color, target_king) & attacker & pawns != 0
+    {
+        return false;
+    }
+
     if ep != 0 {
         let expected_rank = if turn { 5 } else { 2 };
         if ep >= 64 || ep / 8 != expected_rank || occupied & (1u64 << ep) != 0 {
@@ -149,39 +166,6 @@ fn valid_probe_position(
         }
     }
     true
-}
-
-#[cfg(test)]
-mod position_tests {
-    use super::valid_probe_position;
-
-    #[test]
-    fn reject_bitboards_that_the_encoder_cannot_represent() {
-        let kings = (1u64 << 12) | (1u64 << 60);
-        let pawns = (1u64 << 0) | (1u64 << 1);
-        let white = (1u64 << 12) | (1u64 << 0);
-        let black = (1u64 << 60) | (1u64 << 1);
-        let valid = |white, black, kings, pawns, ep| {
-            valid_probe_position(white, black, kings, 0, 0, 0, 0, pawns, ep, true)
-        };
-        assert!(!valid(white, black, kings, pawns, 0));
-        assert!(!valid(white | black, black, kings, pawns, 0));
-        assert!(!valid(white, black, kings | pawns, pawns, 0));
-        let valid_white = (1u64 << 12) | (1u64 << 36);
-        let valid_black = (1u64 << 60) | (1u64 << 35);
-        let valid_pawns = (1u64 << 36) | (1u64 << 35);
-        assert!(valid(valid_white, valid_black, kings, valid_pawns, 43));
-        let adjacent_kings = (1u64 << 12) | (1u64 << 20);
-        assert!(!valid(
-            valid_white,
-            (1u64 << 20) | (1u64 << 35),
-            adjacent_kings,
-            valid_pawns,
-            43
-        ));
-        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 19));
-        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 64));
-    }
 }
 
 impl<E: EngineAdapter> TableBases<E> {
@@ -223,7 +207,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<WdlProbeResult, TBError> {
-        if !valid_probe_position(
+        if !valid_probe_position::<E>(
             white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
         ) {
             return Err(TBError::ProbeFailed);
@@ -261,7 +245,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<i32, TBError> {
-        if !valid_probe_position(
+        if !valid_probe_position::<E>(
             white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
         ) {
             return Err(TBError::ProbeFailed);
@@ -296,7 +280,7 @@ impl<E: EngineAdapter> TableBases<E> {
         turn: bool,
     ) -> Result<DtzProbeResult, TBError> {
         if rule50 > u8::MAX as u32
-            || !valid_probe_position(
+            || !valid_probe_position::<E>(
                 white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
             )
         {
@@ -398,5 +382,207 @@ fn extract_dtz_result(result: u32) -> DtzProbeValue {
                 dtz: dtz as u16,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::valid_probe_position;
+    use crate::engine_adapter::{Color, EngineAdapter};
+    use cozy_chess::{
+        get_bishop_moves, get_king_moves, get_knight_moves, get_pawn_attacks, get_rook_moves,
+        BitBoard, Square,
+    };
+
+    #[derive(Clone)]
+    struct TestAdapter;
+
+    impl EngineAdapter for TestAdapter {
+        fn pawn_attacks(color: Color, square: u64) -> u64 {
+            get_pawn_attacks(
+                Square::index(square as usize),
+                if color == Color::White {
+                    cozy_chess::Color::White
+                } else {
+                    cozy_chess::Color::Black
+                },
+            )
+            .0
+        }
+        fn knight_attacks(square: u64) -> u64 {
+            get_knight_moves(Square::index(square as usize)).0
+        }
+        fn bishop_attacks(square: u64, occupied: u64) -> u64 {
+            get_bishop_moves(Square::index(square as usize), BitBoard(occupied)).0
+        }
+        fn rook_attacks(square: u64, occupied: u64) -> u64 {
+            get_rook_moves(Square::index(square as usize), BitBoard(occupied)).0
+        }
+        fn queen_attacks(square: u64, occupied: u64) -> u64 {
+            Self::bishop_attacks(square, occupied) | Self::rook_attacks(square, occupied)
+        }
+        fn king_attacks(square: u64) -> u64 {
+            get_king_moves(Square::index(square as usize)).0
+        }
+    }
+
+    #[test]
+    fn reject_bitboards_that_the_encoder_cannot_represent() {
+        let kings = (1u64 << 12) | (1u64 << 60);
+        let pawns = (1u64 << 0) | (1u64 << 1);
+        let white = (1u64 << 12) | (1u64 << 0);
+        let black = (1u64 << 60) | (1u64 << 1);
+        let valid = |white, black, kings, pawns, ep| {
+            valid_probe_position::<TestAdapter>(white, black, kings, 0, 0, 0, 0, pawns, ep, true)
+        };
+        assert!(!valid(white, black, kings, pawns, 0));
+        assert!(!valid(white | black, black, kings, pawns, 0));
+        assert!(!valid(white, black, kings | pawns, pawns, 0));
+        let valid_white = (1u64 << 12) | (1u64 << 36);
+        let valid_black = (1u64 << 60) | (1u64 << 35);
+        let valid_pawns = (1u64 << 36) | (1u64 << 35);
+        assert!(valid(valid_white, valid_black, kings, valid_pawns, 43));
+        let adjacent_kings = (1u64 << 12) | (1u64 << 20);
+        assert!(!valid(
+            valid_white,
+            (1u64 << 20) | (1u64 << 35),
+            adjacent_kings,
+            valid_pawns,
+            43
+        ));
+        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 19));
+        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 64));
+    }
+
+    #[test]
+    fn reject_attacked_opposing_king_but_accept_blocked_rays_and_check() {
+        let bit = |square| 1u64 << square;
+        let valid = |white, black, kings, queens, rooks, bishops, knights, pawns, turn| {
+            valid_probe_position::<TestAdapter>(
+                white, black, kings, queens, rooks, bishops, knights, pawns, 0, turn,
+            )
+        };
+
+        let kings = bit(0) | bit(63); // White Ka1, Black Kh8.
+        assert!(!valid(
+            bit(0) | bit(7),
+            bit(63),
+            kings,
+            0,
+            bit(7),
+            0,
+            0,
+            0,
+            true
+        ));
+        assert!(!valid(
+            bit(0) | bit(53),
+            bit(63),
+            kings,
+            0,
+            0,
+            0,
+            bit(53),
+            0,
+            true
+        ));
+        assert!(!valid(
+            bit(0) | bit(54),
+            bit(63),
+            kings,
+            0,
+            0,
+            0,
+            0,
+            bit(54),
+            true
+        ));
+        assert!(valid(
+            bit(0) | bit(7) | bit(31),
+            bit(63),
+            kings,
+            0,
+            bit(7),
+            0,
+            0,
+            bit(31),
+            true
+        ));
+
+        let bishop_kings = bit(1) | bit(63); // White Kb1 leaves a1 free.
+        assert!(!valid(
+            bit(1) | bit(0),
+            bit(63),
+            bishop_kings,
+            0,
+            0,
+            bit(0),
+            0,
+            0,
+            true
+        ));
+        assert!(valid(
+            bit(1) | bit(0) | bit(18),
+            bit(63),
+            bishop_kings,
+            0,
+            0,
+            bit(0),
+            0,
+            bit(18),
+            true,
+        ));
+
+        // Black's b2 pawn attacks White's a1 king. Reverse pawn attacks are
+        // needed when checking attacks from the target king square.
+        assert!(!valid(
+            bit(0),
+            bit(63) | bit(9),
+            kings,
+            0,
+            0,
+            0,
+            0,
+            bit(9),
+            false
+        ));
+        assert!(valid(
+            bit(0),
+            bit(63) | bit(9),
+            kings,
+            0,
+            0,
+            0,
+            0,
+            bit(9),
+            true
+        ));
+
+        // A side to move in check is legal; the reverse orientation is not.
+        let checked_kings = bit(4) | bit(58);
+        let white = bit(4) | bit(2);
+        let black = bit(58);
+        assert!(valid(
+            white,
+            black,
+            checked_kings,
+            bit(2),
+            0,
+            0,
+            0,
+            0,
+            false
+        ));
+        assert!(!valid(
+            white,
+            black,
+            checked_kings,
+            bit(2),
+            0,
+            0,
+            0,
+            0,
+            true
+        ));
     }
 }

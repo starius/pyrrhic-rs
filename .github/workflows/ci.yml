@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Check formatting
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path tools/syzygy-reference/Cargo.toml --check
+          cargo fmt --manifest-path tools/syzygy-fuzz/Cargo.toml --check
+      - name: Check library and examples
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run library tests and doctests
+        run: cargo test --locked --all-features -- --test-threads=1
+
+  compact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Python tools
+        run: python3 -m pip install -r tools/requirements.txt
+      - name: Fetch and verify compact tables
+        run: |
+          python3 tools/fetch_syzygy_ci.py --out-dir "$RUNNER_TEMP/syzygy-ci"
+          echo "SYZYGY_CI_PATH=$RUNNER_TEMP/syzygy-ci" >> "$GITHUB_ENV"
+      - name: Run real-table tests
+        run: |
+          cargo test --locked --all-features ci_compact_tables_ \
+            -- --ignored --test-threads=1
+          cargo test --locked --manifest-path tools/syzygy-reference/Cargo.toml \
+            ci_reference_preserves_signed_distance_and_rounding \
+            -- --ignored --test-threads=1
+      - name: Compare direct probes
+        run: |
+          cargo build --locked --example syzygy_probe
+          cargo build --locked --manifest-path tools/syzygy-reference/Cargo.toml
+          python3 tools/compare_syzygy.py \
+            --reference tools/syzygy-reference/target/debug/pyrrhic-syzygy-reference \
+            --candidate target/debug/examples/syzygy_probe \
+            --tables "$SYZYGY_CI_PATH" \
+            --manifest nix/syzygy-3-4-5.json \
+            --cases tools/syzygy_compact_cases.jsonl \
+            --output-dir "$RUNNER_TEMP/syzygy-comparison"
+          python3 -c 'import json, os, pathlib; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / "syzygy-comparison/summary.json"; s = json.loads(p.read_text()); assert (s["compared"], s["mismatches"]) == (18, 0)'
+      - name: Run Python tests and check fuzz builds
+        run: |
+          python3 -m unittest discover -s tools/tests -p 'test_*.py'
+          cargo check --locked --all-targets \
+            --manifest-path tools/syzygy-fuzz/Cargo.toml
+      - name: Verify library package contents
+        run: |
+          cargo package --locked
+          cargo package --locked --list > "$RUNNER_TEMP/package-files.txt"
+          grep -qx LICENSE "$RUNNER_TEMP/package-files.txt"
+          grep -qx LICENSE-PYRRHIC "$RUNNER_TEMP/package-files.txt"
+          if grep -Eq '^(tools/|nix/|\.github/)' "$RUNNER_TEMP/package-files.txt"; then
+            echo 'Independent tooling entered the library package' >&2
+            exit 1
+          fi
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: syzygy-compact-comparison
+          path: ${{ runner.temp }}/syzygy-comparison
+          if-no-files-found: ignore
+          retention-days: 7

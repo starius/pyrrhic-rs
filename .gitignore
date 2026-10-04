@@ -2,3 +2,5 @@
 /.vscode
 /.cargo
 /Pyrrhic
+__pycache__/
+*.pyc

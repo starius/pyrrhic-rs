@@ -87,3 +87,32 @@ With Rust and Cargo installed, run `cargo fmt --all --check`,
 files; their required material and environment variables are stated beside
 each test. Run `cargo package --locked --list` to inspect the distributable
 library archive.
+
+For the compact real-table suite, install the pinned Python dependency with
+`python3 -m pip install -r tools/requirements.txt`, then run:
+
+```sh
+tables="$(mktemp -d)"
+python3 tools/fetch_syzygy_ci.py --out-dir "$tables"
+export SYZYGY_CI_PATH="$tables"
+cargo test --locked --all-features ci_compact_tables_ \
+  -- --ignored --test-threads=1
+cargo test --locked --manifest-path tools/syzygy-reference/Cargo.toml \
+  ci_reference_preserves_signed_distance_and_rounding \
+  -- --ignored --test-threads=1
+cargo build --locked --example syzygy_probe
+cargo build --locked --manifest-path tools/syzygy-reference/Cargo.toml
+python3 tools/compare_syzygy.py \
+  --reference tools/syzygy-reference/target/debug/pyrrhic-syzygy-reference \
+  --candidate target/debug/examples/syzygy_probe \
+  --tables "$tables" --manifest nix/syzygy-3-4-5.json \
+  --cases tools/syzygy_compact_cases.jsonl \
+  --output-dir "$(mktemp -d)/comparison"
+python3 -m unittest discover -s tools/tests -p 'test_*.py'
+```
+
+The compact set has ten files and totals 774,944 bytes. The independent
+reference executable uses GPL crates in its separate Cargo workspace. It is
+for testing only and is excluded from the library package. Full 3–5 piece
+regressions in `tools/syzygy_full_regressions.jsonl` require the complete
+table set and should be run when that set is already available.

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-//! Checked Syzygy metadata parsing. Decoding uses the same parsed factors and
-//! piece order as the legacy probe while the remaining decoder is converted.
+//! Checked Syzygy metadata parsing. Decoding uses the parsed factors and
+//! piece order supplied by this module.
 
 use std::ops::Range;
 

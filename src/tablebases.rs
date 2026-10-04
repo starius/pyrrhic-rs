@@ -94,7 +94,7 @@ pub struct TableBases<E: EngineAdapter> {
 
 static ROOT_PROBE_MUTEX: Mutex<()> = Mutex::new(());
 
-/// Reject bitboards that the translated encoder cannot safely represent.
+/// Reject bitboards that the table encoder cannot represent.
 /// The caller may pass an arbitrary position through this safe API.
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -142,8 +142,8 @@ fn valid_probe_position<E: EngineAdapter>(
     }
 
     // A legal chess position can have the side to move in check, but the
-    // opposing king cannot already be attacked. Otherwise the translated
-    // capture generator may remove that king and index a nonexistent square.
+    // opposing king cannot already be attacked. The recursive probe assumes
+    // it cannot capture a king and indexes both kings after every move.
     let (attacker, target_king, reverse_pawn_color) = if turn {
         (white, black_king, Color::Black)
     } else {

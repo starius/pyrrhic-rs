@@ -1,10 +1,21 @@
 # Pyrrhic-rs
 
-`pyrrhic-rs` is a library for use in chess engines to probe the Syzygy endgame tablesbases during a search.
+`pyrrhic-rs` is a Rust library for probing Syzygy endgame tablebases during a
+chess-engine search. This fork retains the original MIT attribution
+and the Pyrrhic table format and probing policy.
 
 ## Usage
-Pyrrhic's original API is unsafe, with potential for memory corruption if used improperly. Therefore `pyrrhic-rs` wraps this unsafe API in the `TableBases` struct, which guards against memory- and thread-unsafe usage of the Pyrrhic API.
 
+The parser, decoder, encoder, move generator, recursive probe, and generation
+ownership use safe Rust. The only unsafe operation in this crate maps a table
+file through `memmap2`; each mapping stays owned by its loaded generation.
+The mapped files must remain unchanged and untruncated for the lifetime of
+every generation using them. Read-only mappings do not protect against
+changes made by another process.
+
+`TableBases` checks input bitboards before probing and publishes complete WDL
+and DTZ loads independently. Clone handles retain the same immutable discovery
+generation. A newly constructed handle discovers and loads its own generation.
 
 As `pyrrhic-rs` is designed to be used within an existing engine, the user must implement the `EngineAdapter` trait on a type for the probing code to be able to use the engine's own move generation code. Afterwards, `TableBases::new()` can be called using this type as a parameter.
 
@@ -58,8 +69,9 @@ fn main() {
 
 - [Fathom](https://github.com/basil00/Fathom) © 2015 basil, all rights reserved
 - Modifications Copyright © 2016-2019 by Jon Dart
-- Modifications Copyright © 2020-2020 by Andrew Grant
+- Modifications Copyright © 2020-2024 by Andrew Grant
 
 ## Acknowledgments
 - Ronald "Syzygy" de Man, creator of the Syzygy tablebases
-- [C2Rust](https://github.com/immunant/c2rust), used to initally translate the C code into Rust code
+- [C2Rust](https://github.com/immunant/c2rust), used for the original translation
+  of the C implementation into Rust

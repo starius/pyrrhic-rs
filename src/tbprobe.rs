@@ -177,10 +177,15 @@ impl PawnEntry {
     }
 }
 #[derive(Copy, Clone)]
-#[repr(C)]
-pub(crate) struct TbHashEntry {
-    pub(crate) key: u64,
-    pub(crate) ptr: *mut BaseEntry,
+enum EntryIndex {
+    Piece(usize),
+    Pawn(usize),
+}
+
+#[derive(Copy, Clone)]
+struct TbHashEntry {
+    key: u64,
+    entry: Option<EntryIndex>,
 }
 pub(crate) const DTZ: u32 = 1;
 #[derive(Copy, Clone)]
@@ -309,7 +314,7 @@ impl Default for RawState {
             pawn_entry: Vec::new().into_boxed_slice(),
             hash: [TbHashEntry {
                 key: 0,
-                ptr: std::ptr::null_mut(),
+                entry: None,
             }; 4096],
         }
     }
@@ -1310,14 +1315,14 @@ unsafe fn map_tb(
     close_tb(file);
     data
 }
-unsafe fn add_to_hash(mut ptr: *mut BaseEntry, mut key: u64) {
+unsafe fn add_to_hash(entry: EntryIndex, key: u64) {
     let mut idx: i32 = 0;
     idx = (key >> (64 - 12)) as i32;
-    while !((*active_state()).hash[idx as usize].ptr).is_null() {
+    while (*active_state()).hash[idx as usize].entry.is_some() {
         idx = (idx + 1) & ((1 << 12) - 1);
     }
     (*active_state()).hash[idx as usize].key = key;
-    (*active_state()).hash[idx as usize].ptr = ptr;
+    (*active_state()).hash[idx as usize].entry = Some(entry);
 }
 unsafe fn init_tb(mut str: *const c_char) {
     if test_tb(str, TB_SUFFIX[WDL as i32 as usize]) != 1 {
@@ -1347,14 +1352,18 @@ unsafe fn init_tb(mut str: *const c_char) {
     let mut key2: u64 = pyrrhic_calc_key_from_pcs(pcs.as_mut_ptr(), 1);
     let mut hasPawns: bool =
         pcs[PYRRHIC_WPAWN as i32 as usize] != 0 || pcs[PYRRHIC_BPAWN as i32 as usize] != 0;
-    let mut be: *mut BaseEntry = if hasPawns as i32 != 0 {
+    let entry = if hasPawns as i32 != 0 {
         let fresh10 = (*active_state()).num_pawn;
         (*active_state()).num_pawn += 1;
-        &mut (*active_state()).pawn_entry[fresh10 as usize].be
+        EntryIndex::Pawn(fresh10 as usize)
     } else {
         let fresh11 = (*active_state()).num_piece;
         (*active_state()).num_piece += 1;
-        &mut (*active_state()).piece_entry[fresh11 as usize].be
+        EntryIndex::Piece(fresh11 as usize)
+    };
+    let be: *mut BaseEntry = match entry {
+        EntryIndex::Piece(index) => &mut (*active_state()).piece_entry[index].be,
+        EntryIndex::Pawn(index) => &mut (*active_state()).pawn_entry[index].be,
     };
     (*be).hasPawns = hasPawns;
     (*be).key = key;
@@ -1401,9 +1410,9 @@ unsafe fn init_tb(mut str: *const c_char) {
             (*be).c2rust_unnamed.pawns[1] = tmp as u8;
         }
     }
-    add_to_hash(be, key);
+    add_to_hash(entry, key);
     if key != key2 {
-        add_to_hash(be, key2);
+        add_to_hash(entry, key2);
     }
 }
 
@@ -2670,11 +2679,14 @@ pub(crate) unsafe fn probe_table(
     while (*state).hash[hashIdx as usize].key != 0 && (*state).hash[hashIdx as usize].key != key {
         hashIdx = (hashIdx + 1) & ((1 << 12) - 1);
     }
-    if ((*state).hash[hashIdx as usize].ptr).is_null() {
+    let Some(entry) = (*state).hash[hashIdx as usize].entry else {
         *success = 0;
         return 0;
-    }
-    let mut be: *mut BaseEntry = (*state).hash[hashIdx as usize].ptr;
+    };
+    let be: *mut BaseEntry = match entry {
+        EntryIndex::Piece(index) => &raw mut (*state).piece_entry[index].be,
+        EntryIndex::Pawn(index) => &raw mut (*state).pawn_entry[index].be,
+    };
     if type_0 == DTZ as i32 && !(*be).hasDtz {
         *success = 0;
         return 0;

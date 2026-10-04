@@ -232,6 +232,9 @@ fn probe_dtz_inner<E: EngineAdapter>(
             }
         }
     }
+    if best == i32::MAX {
+        return Err(ProbeError);
+    }
     Ok(best)
 }
 

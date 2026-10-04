@@ -285,3 +285,49 @@ fn ci_compact_tables_reject_invalid_successor_wdl() {
     drop(tables);
     std::fs::remove_dir_all(destination).unwrap();
 }
+
+// A corrupt WDL table can claim a win for both sides while the DTZ table
+// covers only one side. The wrong-side fallback must report failure when none
+// of its legal successors preserves that claimed win. This direct probe
+// contract cannot be expressed as a TSV move fixture.
+#[test]
+fn unresolved_winning_dtz_probe_fails() {
+    let destination = std::env::temp_dir().join(format!(
+        "pyrrhic-unresolved-dtz-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&destination).unwrap();
+
+    // Constant KQvK WDL leaves claim a win for either side to move.
+    let mut wdl = [0u8; 80];
+    wdl[..4].copy_from_slice(&0x5d23_e871_u32.to_le_bytes());
+    wdl[4] = 1;
+    wdl[5..9].copy_from_slice(&[0, 0x6e, 0xe6, 0x55]);
+    wdl[10..14].copy_from_slice(&[0x80, 4, 0x80, 4]);
+    std::fs::write(destination.join("KQvK.rtbw"), wdl).unwrap();
+
+    // DTZ is available for White to move, forcing a Black probe to examine
+    // legal successors. Each successor has the opposite, inconsistent WDL.
+    let mut dtz = [0u8; 80];
+    dtz[..4].copy_from_slice(&0xa50c_66d7_u32.to_le_bytes());
+    dtz[5..9].copy_from_slice(&[0, 6, 14, 5]);
+    dtz[10..12].copy_from_slice(&[0x80, 0]);
+    std::fs::write(destination.join("KQvK.rtbz"), dtz).unwrap();
+
+    let tables = TableBases::<Adapter>::new(destination.to_str().unwrap()).unwrap();
+    let black_to_move = Position {
+        turn: false,
+        ..Position::WITNESS
+    };
+    assert_eq!(probe(&tables, black_to_move, Probe::Wdl), Ok(1));
+    assert_eq!(
+        probe(&tables, black_to_move, Probe::Dtz),
+        Err(TBError::ProbeFailed)
+    );
+    drop(tables);
+    std::fs::remove_dir_all(destination).unwrap();
+}

@@ -240,6 +240,49 @@ fn path_components_are_bounded_and_embedded_nul_fails() {
 }
 
 #[test]
+fn concurrent_failed_lazy_probes_do_not_mutate_material_hash() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-corrupt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::File::create(dir.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let workers = (0..8)
+        .map(|_| {
+            let tb = tb.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+                barrier.wait();
+                for _ in 0..50 {
+                    let result = tb.probe_wdl(
+                        board.colors(cozy_chess::Color::White).0,
+                        board.colors(cozy_chess::Color::Black).0,
+                        board.pieces(Piece::King).0,
+                        board.pieces(Piece::Queen).0,
+                        board.pieces(Piece::Rook).0,
+                        board.pieces(Piece::Bishop).0,
+                        board.pieces(Piece::Knight).0,
+                        board.pieces(Piece::Pawn).0,
+                        0,
+                        true,
+                    );
+                    assert_eq!(result, Err(TBError::ProbeFailed));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(tb.max_pieces(), 3);
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";
     let first_tb = loop {

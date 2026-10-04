@@ -52,6 +52,7 @@ pub(crate) struct BaseEntry {
     pub(crate) data: [*mut Mmap; 3],
     pub(crate) mapping: [u64; 3],
     pub(crate) ready: [AtomicBool; 3],
+    pub(crate) failed: [AtomicBool; 3],
     pub(crate) num: u8,
     pub(crate) symmetric: bool,
     pub(crate) hasPawns: bool,
@@ -1312,6 +1313,7 @@ unsafe fn init_tb(mut str: *const c_char) {
     }
     for table_type in 0..3 {
         (*be).ready[table_type] = AtomicBool::new(false);
+        (*be).failed[table_type] = AtomicBool::new(false);
     }
     if !(*be).hasPawns {
         let mut j: i32 = 0;
@@ -2781,14 +2783,20 @@ pub(crate) unsafe fn probe_table(
         *success = 0;
         return 0;
     }
+    if (*be).failed[type_0 as usize].load(Ordering::Acquire) {
+        *success = 0;
+        return 0;
+    }
     if !(*be).ready[type_0 as usize].load(Ordering::Acquire) {
         // will be unlocked at the end of scope
         let lock = TB_MUTEX.lock().unwrap();
-        if !(*be).ready[type_0 as usize].load(Ordering::Relaxed) {
+        if !(*be).ready[type_0 as usize].load(Ordering::Relaxed)
+            && !(*be).failed[type_0 as usize].load(Ordering::Relaxed)
+        {
             let mut str: [c_char; 16] = [0; 16];
             prt_str(pos, str.as_mut_ptr(), ((*be).key != key) as i32);
             if !init_table(be, str.as_mut_ptr(), type_0) {
-                tbHash[hashIdx as usize].ptr = std::ptr::null_mut::<BaseEntry>();
+                (*be).failed[type_0 as usize].store(true, Ordering::Release);
                 *success = 0;
                 drop(lock);
                 return 0;
@@ -2796,6 +2804,10 @@ pub(crate) unsafe fn probe_table(
             (*be).ready[type_0 as usize].store(true, Ordering::Release);
         }
         drop(lock);
+    }
+    if (*be).failed[type_0 as usize].load(Ordering::Acquire) {
+        *success = 0;
+        return 0;
     }
     let mut bside: bool = false;
     let mut flip: bool = false;

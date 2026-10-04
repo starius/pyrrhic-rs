@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{io::Write, str::FromStr};
 
 use crate::{
     engine_adapter::{Color, EngineAdapter},
@@ -474,6 +474,33 @@ fn short_header_after_discovery_returns_probe_failure() {
     assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
     assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
     drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn valid_magic_in_an_impossibly_short_table_returns_probe_failure() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-short-magic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.write_all(&0x5d23_e871_u32.to_le_bytes()).unwrap();
+    file.set_len(16).unwrap();
+    assert!(matches!(
+        TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()),
+        Err(TBError::BadPath)
+    ));
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    file.set_len(79).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    file.set_len(81).unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    drop(file);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

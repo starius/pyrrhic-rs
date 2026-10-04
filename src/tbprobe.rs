@@ -14,6 +14,7 @@ enum TableType {
     Wdl,
     Dtz,
 }
+const TB_MIN_FILE_SIZE: u64 = 80;
 extern "C" {
     fn perror(__s: *const c_char);
     fn malloc(_: usize) -> *mut libc::c_void;
@@ -366,12 +367,19 @@ unsafe fn map_file(file: &File, mapping: *mut u64) -> *mut Mmap {
     let Ok(metadata) = file.metadata() else {
         return std::ptr::null_mut();
     };
-    if metadata.len() < 5 {
+    // Every table in the pinned 3-6 piece manifests is at least 80 bytes
+    // and has a size congruent to 16 modulo 64. Reject impossible envelopes
+    // before the translated decoder reads fields past the five-byte magic
+    // header. This does not validate the compressed payload.
+    if metadata.len() < TB_MIN_FILE_SIZE || metadata.len() % 64 != 16 {
         return std::ptr::null_mut();
     }
     let Ok(mmap) = MmapOptions::new().map(file) else {
         return std::ptr::null_mut();
     };
+    if mmap.len() as u64 != metadata.len() {
+        return std::ptr::null_mut();
+    }
     *mapping = metadata.len();
     Box::into_raw(Box::new(mmap))
 }
@@ -1297,7 +1305,7 @@ unsafe fn test_tb(mut str: *const c_char, mut suffix: *const c_char) -> i32 {
         };
         let size = metadata.len();
         close_tb(file);
-        if size & 63 != 16 {
+        if size < TB_MIN_FILE_SIZE || size & 63 != 16 {
             let file_path = format!(
                 "{}.{}",
                 CStr::from_ptr(str).to_str().unwrap(),
@@ -2503,7 +2511,7 @@ unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> boo
 
     let mut data = (*mmap).as_ptr() as *mut u8;
 
-    if (&*mmap).len() < 5 {
+    if ((&*mmap).len() as u64) < TB_MIN_FILE_SIZE {
         unmap_file(mmap, (*be).mapping[type_0 as usize]);
         return false;
     }

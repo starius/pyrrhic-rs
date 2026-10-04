@@ -3,6 +3,7 @@ use std::{
     ffi::{CStr, CString},
     fs::{File, OpenOptions},
     os::raw::c_char,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, Once,
@@ -280,7 +281,7 @@ const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 /// The entry arrays are allocated once and their addresses remain stable until
 /// the final handle is dropped.
 pub(crate) struct RawState {
-    paths: Vec<CString>,
+    paths: Vec<PathBuf>,
     discovered: Vec<(String, bool)>,
     pub(crate) max_cardinality: i32,
     pub(crate) largest: i32,
@@ -288,8 +289,8 @@ pub(crate) struct RawState {
     pub(crate) num_dtz: i32,
     num_piece: i32,
     num_pawn: i32,
-    piece_entry: *mut PieceEntry,
-    pawn_entry: *mut PawnEntry,
+    piece_entry: Box<[PieceEntry]>,
+    pawn_entry: Box<[PawnEntry]>,
     hash: [TbHashEntry; 4096],
 }
 
@@ -304,8 +305,8 @@ impl Default for RawState {
             num_dtz: 0,
             num_piece: 0,
             num_pawn: 0,
-            piece_entry: std::ptr::null_mut(),
-            pawn_entry: std::ptr::null_mut(),
+            piece_entry: Vec::new().into_boxed_slice(),
+            pawn_entry: Vec::new().into_boxed_slice(),
             hash: [TbHashEntry {
                 key: 0,
                 ptr: std::ptr::null_mut(),
@@ -388,12 +389,11 @@ unsafe fn open_tb(
     for path in &(*state).paths {
         let str = CStr::from_ptr(str);
         let suffix = CStr::from_ptr(suffix);
-        let file = format!(
-            "{}/{}{}",
-            path.to_str().unwrap(),
+        let file = path.join(format!(
+            "{}{}",
             str.to_str().unwrap(),
             suffix.to_str().unwrap()
-        );
+        ));
         let file_handle = OpenOptions::new().read(true).open(file);
         if file_handle.is_ok() {
             return file_handle;
@@ -1350,11 +1350,11 @@ unsafe fn init_tb(mut str: *const c_char) {
     let mut be: *mut BaseEntry = if hasPawns as i32 != 0 {
         let fresh10 = (*active_state()).num_pawn;
         (*active_state()).num_pawn += 1;
-        &mut (*(*active_state()).pawn_entry.offset(fresh10 as isize)).be
+        &mut (*active_state()).pawn_entry[fresh10 as usize].be
     } else {
         let fresh11 = (*active_state()).num_piece;
         (*active_state()).num_piece += 1;
-        &mut (*(*active_state()).piece_entry.offset(fresh11 as isize)).be
+        &mut (*active_state()).piece_entry[fresh11 as usize].be
     };
     (*be).hasPawns = hasPawns;
     (*be).key = key;
@@ -1459,24 +1459,21 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
         .split(PATH_SEPARATOR)
         .filter(|component| !component.is_empty())
     {
-        let Ok(component) = CString::new(component) else {
+        if component.contains('\0') {
             return false;
-        };
-        (*state).paths.push(component);
+        }
+        (*state).paths.push(PathBuf::from(component));
     }
-    (*state).piece_entry = malloc(650 * ::core::mem::size_of::<PieceEntry>()) as *mut PieceEntry;
-    (*state).pawn_entry = malloc(861 * ::core::mem::size_of::<PawnEntry>()) as *mut PawnEntry;
-    if (*state).piece_entry.is_null() || (*state).pawn_entry.is_null() {
-        return false;
-    }
-    // Construct every element before init_tb forms references into these
-    // allocations. Unused EncInfo tails must be initialized as well.
-    for i in 0..650 {
-        std::ptr::write((*state).piece_entry.add(i), PieceEntry::initialized());
-    }
-    for i in 0..861 {
-        std::ptr::write((*state).pawn_entry.add(i), PawnEntry::initialized());
-    }
+    // The boxes keep entry addresses stable while the temporary raw hash
+    // bridge is in use. Every entry and unused encoding tail is initialized.
+    (*state).piece_entry = std::iter::repeat_with(PieceEntry::initialized)
+        .take(650)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    (*state).pawn_entry = std::iter::repeat_with(PawnEntry::initialized)
+        .take(861)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     let mut i_4: i32 = 0;
     let mut j_0: i32 = 0;
     let mut k: i32 = 0;
@@ -1763,15 +1760,11 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
 pub(crate) unsafe fn tb_free() {
     let state = active_state();
     for i in 0..(*state).num_piece {
-        free_tb_entry(&mut (*(*state).piece_entry.offset(i as isize)).be);
+        free_tb_entry(&mut (*state).piece_entry[i as usize].be);
     }
     for i in 0..(*state).num_pawn {
-        free_tb_entry(&mut (*(*state).pawn_entry.offset(i as isize)).be);
+        free_tb_entry(&mut (*state).pawn_entry[i as usize].be);
     }
-    free((*state).piece_entry as *mut libc::c_void);
-    free((*state).pawn_entry as *mut libc::c_void);
-    (*state).piece_entry = std::ptr::null_mut();
-    (*state).pawn_entry = std::ptr::null_mut();
 }
 #[rustfmt::skip]
 const OFF_DIAG: [i8; 64] = [
@@ -3171,7 +3164,7 @@ mod initialization_tests {
     use super::*;
 
     #[test]
-    fn allocation_is_initialized_before_entries_are_referenced() {
+    fn owned_entries_and_unused_encoding_tails_are_initialized() {
         let dir = std::env::temp_dir().join(format!(
             "pyrrhic-initialized-{}-{}",
             std::process::id(),
@@ -3192,14 +3185,16 @@ mod initialization_tests {
             let state = unsafe { &*active_state() };
             assert!(state.num_piece > 0);
             assert!(state.num_pawn > 0);
-            for entry in unsafe { std::slice::from_raw_parts(state.piece_entry, 650) } {
+            assert_eq!(state.piece_entry.len(), 650);
+            assert_eq!(state.pawn_entry.len(), 861);
+            for entry in &state.piece_entry {
                 assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
                 assert!(entry.be.data.iter().all(|data| data.is_null()));
             }
-            for entry in unsafe { std::slice::from_raw_parts(state.pawn_entry, 861) } {
+            for entry in &state.pawn_entry {
                 assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));

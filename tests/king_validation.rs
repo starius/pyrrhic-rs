@@ -202,3 +202,35 @@ fn ci_compact_tables_accept_legal_side_to_move_in_check() {
     assert!(probe(&tb, checked, Probe::Dtz).unwrap() < 0);
     assert_eq!(probe(&tb, checked, Probe::Root), Ok(-1));
 }
+
+// This checks the public packed move array and successor clock at the API's
+// u8 limit. Ember's TSV move fixtures cannot set a 254/255 halfmove clock.
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_root_array_saturates_at_maximum_clock() {
+    let path = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let tb = TableBases::<Adapter>::new(path).unwrap();
+    let pos = Position::WITNESS;
+    let root_at = |clock| {
+        tb.probe_root(
+            pos.white, pos.black, pos.kings, pos.queens, 0, 0, 0, 0, clock, 0, pos.turn,
+        )
+        .unwrap()
+    };
+    let at_254 = root_at(254);
+    let at_255 = root_at(255);
+    assert!(matches!(
+        at_255.root,
+        DtzProbeValue::DtzResult(value) if value.wdl == WdlProbeResult::CursedWin
+    ));
+    assert!(at_255.num_moves > 0);
+    assert!(at_255.moves[..at_255.num_moves]
+        .iter()
+        .all(|value| matches!(value, DtzProbeValue::DtzResult(_))));
+    assert!(at_255.moves[at_255.num_moves..]
+        .iter()
+        .all(|value| matches!(value, DtzProbeValue::Failed)));
+    assert_eq!(at_254.root, at_255.root);
+    assert_eq!(at_254.num_moves, at_255.num_moves);
+    assert_eq!(at_254.moves, at_255.moves);
+}

@@ -9,7 +9,7 @@ use cozy_chess::{
     Board, Color as ChessColor, Piece as ChessPiece, Rank, Square,
 };
 use pyrrhic_rs::{
-    Color, DtzProbeValue, EngineAdapter, Piece as ProbePiece, TableBases, WdlProbeResult,
+    Color, DtzProbeValue, DtzResult, EngineAdapter, Piece as ProbePiece, TableBases, WdlProbeResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,14 @@ struct MoveResult {
 }
 
 #[derive(Serialize)]
+struct PackedMoveResult {
+    uci: String,
+    wdl: i32,
+    dtz: u16,
+    ep: bool,
+}
+
+#[derive(Serialize)]
 struct Response {
     version: u8,
     id: String,
@@ -95,6 +103,10 @@ struct Response {
     root_status: Option<&'static str>,
     selected_move: Option<String>,
     moves: Option<Vec<MoveResult>>,
+    packed_root: Option<PackedMoveResult>,
+    packed_moves: Option<Vec<PackedMoveResult>>,
+    packed_num_moves: Option<usize>,
+    packed_unused_failed: Option<bool>,
 }
 
 impl Response {
@@ -110,6 +122,10 @@ impl Response {
             root_status: None,
             selected_move: None,
             moves: None,
+            packed_root: None,
+            packed_moves: None,
+            packed_num_moves: None,
+            packed_unused_failed: None,
         }
     }
 
@@ -192,6 +208,15 @@ fn root_move_uci(from: u8, to: u8, promotion: ProbePiece) -> String {
     uci
 }
 
+fn packed_move(value: DtzResult) -> PackedMoveResult {
+    PackedMoveResult {
+        uci: root_move_uci(value.from_square, value.to_square, value.promotion),
+        wdl: wdl_number(value.wdl),
+        dtz: value.dtz,
+        ep: value.ep,
+    }
+}
+
 fn respond(req: Request, path: &Path, tb: &TableBases<Adapter>) -> Response {
     let mut response = Response::new(req.id);
     if req.version != 1 {
@@ -265,16 +290,37 @@ fn respond(req: Request, path: &Path, tb: &TableBases<Adapter>) -> Response {
             return response;
         }
     };
+    if root.num_moves > root.moves.len() {
+        response.fail("invalid_root", "root move count exceeds its array");
+        return response;
+    }
+    response.packed_num_moves = Some(root.num_moves);
+    response.packed_unused_failed = Some(
+        root.moves[root.num_moves..]
+            .iter()
+            .all(|value| matches!(value, DtzProbeValue::Failed)),
+    );
+    let mut packed_moves = Vec::with_capacity(root.num_moves);
+    for &value in &root.moves[..root.num_moves] {
+        let DtzProbeValue::DtzResult(value) = value else {
+            response.fail("invalid_root", "active root move is not a distance result");
+            return response;
+        };
+        packed_moves.push(packed_move(value));
+    }
+    response.packed_moves = Some(packed_moves);
     response.root_status = Some(match root.root {
         DtzProbeValue::Checkmate => "checkmate",
         DtzProbeValue::Stalemate => "stalemate",
         DtzProbeValue::DtzResult(best) => {
-            let selected = root_move_uci(best.from_square, best.to_square, best.promotion);
+            let packed = packed_move(best);
+            let selected = packed.uci.clone();
             if !legal.iter().any(|mv| mv.to_string() == selected) {
                 response.fail("invalid_root", format!("selected illegal move {selected}"));
                 return response;
             }
             response.selected_move = Some(selected);
+            response.packed_root = Some(packed);
             "moves"
         }
         DtzProbeValue::Failed => {

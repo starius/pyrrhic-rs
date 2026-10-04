@@ -1216,7 +1216,7 @@ unsafe fn add_to_hash(mut ptr: *mut BaseEntry, mut key: u64) {
     tbHash[idx as usize].ptr = ptr;
 }
 unsafe fn init_tb(mut str: *const c_char) {
-    if test_tb(str, tbSuffix[WDL as i32 as usize]) == 0 {
+    if test_tb(str, tbSuffix[WDL as i32 as usize]) != 1 {
         return;
     }
     let mut pcs: [i32; 16] = [0; 16];

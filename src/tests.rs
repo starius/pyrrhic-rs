@@ -123,6 +123,21 @@ fn test_double_init() {
 }
 
 #[test]
+fn missing_tables_do_not_claim_seven_piece_coverage() {
+    let empty = std::env::temp_dir().join(format!("pyrrhic-empty-{}", std::process::id()));
+    std::fs::create_dir_all(&empty).unwrap();
+    let error = match TableBases::<CozyChessAdapter>::new(empty.to_str().unwrap()) {
+        Ok(tb) => panic!(
+            "empty directory unexpectedly loaded {} pieces",
+            tb.max_pieces()
+        ),
+        Err(error) => error,
+    };
+    assert_eq!(error, TBError::BadPath);
+    std::fs::remove_dir(&empty).unwrap();
+}
+
+#[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";
     let first_tb = loop {

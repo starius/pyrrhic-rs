@@ -37,12 +37,35 @@ pub(crate) enum PairHeader {
         min_len: u8,
         offsets: Box<[u16]>,
         bases: Box<[u64]>,
+        prefix_len_indices: Box<[u8]>,
         symbol_lengths: Box<[u8]>,
         patterns: Box<[[u8; 3]]>,
         index_bytes: usize,
         size_bytes: usize,
         data_bytes: usize,
     },
+}
+
+pub(crate) const HUFFMAN_PREFIX_BITS: u32 = 12;
+
+fn prefix_len_indices(bases: &[u64]) -> Box<[u8]> {
+    let shift = 64 - HUFFMAN_PREFIX_BITS;
+    let mask = (1u64 << shift) - 1;
+    (0..1usize << HUFFMAN_PREFIX_BITS)
+        .map(|prefix| {
+            let low = (prefix as u64) << shift;
+            let high = low | mask;
+            match (
+                bases.iter().position(|&base| low >= base),
+                bases.iter().position(|&base| high >= base),
+            ) {
+                (Some(low_index), Some(high_index)) if low_index == high_index => {
+                    u8::try_from(low_index).unwrap_or(u8::MAX)
+                }
+                _ => u8::MAX,
+            }
+        })
+        .collect()
 }
 
 impl PairHeader {
@@ -319,6 +342,7 @@ pub(crate) fn parse_pair_header(
         }
         *base <<= shift;
     }
+    let prefix_len_indices = prefix_len_indices(&bases);
 
     let total_blocks = real_blocks
         .checked_add(extra_blocks)
@@ -346,6 +370,7 @@ pub(crate) fn parse_pair_header(
         min_len,
         offsets: offsets.into_boxed_slice(),
         bases: bases.into_boxed_slice(),
+        prefix_len_indices,
         symbol_lengths: lengths,
         patterns: patterns.into_boxed_slice(),
         index_bytes,
@@ -489,7 +514,35 @@ pub(crate) fn parse_encoding(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_encoding, parse_pair_header, parse_table, Description, PairHeader};
+    use super::{
+        parse_encoding, parse_pair_header, parse_table, prefix_len_indices, Description,
+        PairHeader, HUFFMAN_PREFIX_BITS,
+    };
+
+    #[test]
+    fn prefix_lookup_keeps_ambiguous_code_ranges_on_the_checked_path() {
+        let boundary = (1234u64 << (64 - HUFFMAN_PREFIX_BITS)) + 5;
+        let bases = [boundary, 0];
+        let lookup = prefix_len_indices(&bases);
+        assert_eq!(lookup.len(), 1 << HUFFMAN_PREFIX_BITS);
+        assert_eq!(lookup[1233], 1);
+        assert_eq!(lookup[1234], u8::MAX);
+        assert_eq!(lookup[1235], 0);
+        let shift = 64 - HUFFMAN_PREFIX_BITS;
+        for (prefix, &index) in lookup.iter().enumerate() {
+            if index == u8::MAX {
+                continue;
+            }
+            let low = (prefix as u64) << shift;
+            let high = low | ((1u64 << shift) - 1);
+            for code in [low, high] {
+                assert_eq!(
+                    Some(usize::from(index)),
+                    bases.iter().position(|&base| code >= base)
+                );
+            }
+        }
+    }
     use crate::storage::{Cursor, ParseError};
     use crate::tbprobe::INDICES;
 

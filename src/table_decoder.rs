@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 //! Safe, allocation-free decoding of one validated Syzygy pair value.
 
-use crate::table_parser::{PairHeader, ParsedPair};
+use crate::table_parser::{PairHeader, ParsedPair, HUFFMAN_PREFIX_BITS};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DecodeError;
@@ -66,6 +66,7 @@ pub(crate) fn decode_pair(
         min_len,
         offsets,
         bases,
+        prefix_len_indices,
         symbol_lengths,
         patterns,
         ..
@@ -152,12 +153,25 @@ pub(crate) fn decode_pair(
     let mut stream_offset = block_offset.checked_add(8).ok_or(DecodeError)?;
     let mut bit_count = 0u32;
     let min_len = usize::from(*min_len);
+    let first_base = bases[0];
     let mut symbol = None;
     for _ in 0..=last_literal {
-        let mut length_index = 0;
-        while code < *bases.get(length_index).ok_or(DecodeError)? {
-            length_index += 1;
-        }
+        let length_index = if code >= first_base {
+            0
+        } else {
+            let quick = prefix_len_indices
+                .get((code >> (64 - HUFFMAN_PREFIX_BITS)) as usize)
+                .copied()
+                .unwrap_or(u8::MAX);
+            if quick != u8::MAX {
+                usize::from(quick)
+            } else {
+                bases
+                    .iter()
+                    .position(|&base| code >= base)
+                    .ok_or(DecodeError)?
+            }
+        };
         let length = min_len + length_index;
         let base = *bases.get(length_index).ok_or(DecodeError)?;
         let first = usize::from(*offsets.get(length_index).ok_or(DecodeError)?);
@@ -239,6 +253,7 @@ mod tests {
                 min_len: 1,
                 offsets: Box::new([0]),
                 bases: Box::new([0]),
+                prefix_len_indices: Box::new([]),
                 symbol_lengths: Box::new([0]),
                 patterns: Box::new([[3, 0xf0, 0xff]]),
                 index_bytes: 6,

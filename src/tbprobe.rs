@@ -1021,24 +1021,14 @@ pub(crate) unsafe fn pyrrhic_do_move<E: EngineAdapter>(
         (*pos).rule50 = 0;
     } else if pyrrhic_test_bit((*pos0).pawns, from as i32) {
         (*pos).rule50 = 0;
-        if from ^ to == 16
-            && (*pos0).turn as i32 == PYRRHIC_WHITE as i32
-            && E::pawn_attacks(Color::Black, from.wrapping_add(8) as u64)
-                & (*pos0).pawns
-                & (*pos0).black
-                != 0
-        {
-            (*pos).ep = from.wrapping_add(8) as u8;
-        }
-        if from ^ to == 16
-            && (*pos0).turn as i32 == PYRRHIC_BLACK as i32
-            && E::pawn_attacks(Color::White, from.wrapping_sub(8) as u64)
-                & (*pos0).pawns
-                & (*pos0).white
-                != 0
-        {
-            (*pos).ep = from.wrapping_sub(8) as u8;
-        } else if to == (*pos0).ep as u32 {
+        let opposing_pawns = (*pos0).pawns
+            & if (*pos0).turn {
+                (*pos0).black
+            } else {
+                (*pos0).white
+            };
+        (*pos).ep = ep_after_double_push::<E>(from, to, (*pos0).turn, opposing_pawns);
+        if to == (*pos0).ep as u32 {
             pyrrhic_disable_bit(
                 &mut (*pos).white,
                 (if (*pos0).turn as i32 != 0 {
@@ -1070,6 +1060,95 @@ pub(crate) unsafe fn pyrrhic_do_move<E: EngineAdapter>(
         (*pos).rule50 = ((*pos0).rule50 as i32 + 1) as u8;
     }
     pyrrhic_is_legal::<E>(pos)
+}
+
+fn ep_after_double_push<E: EngineAdapter>(
+    from: u32,
+    to: u32,
+    white_moved: bool,
+    opposing_pawns: u64,
+) -> u8 {
+    if from ^ to != 16 {
+        return 0;
+    }
+    let ep = if white_moved {
+        from.checked_add(8)
+    } else {
+        from.checked_sub(8)
+    };
+    let Some(ep) = ep.filter(|&square| square < 64) else {
+        return 0;
+    };
+    // Look backward from the target square with the mover's attack
+    // direction to find opposing pawns that can capture en passant.
+    let mover = if white_moved {
+        Color::White
+    } else {
+        Color::Black
+    };
+    if E::pawn_attacks(mover, ep as u64) & opposing_pawns != 0 {
+        ep as u8
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod double_push_tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct AttackOnly;
+
+    impl EngineAdapter for AttackOnly {
+        fn pawn_attacks(color: Color, square: u64) -> u64 {
+            let square = cozy_chess::Square::index(square as usize);
+            let color = if color == Color::White {
+                cozy_chess::Color::White
+            } else {
+                cozy_chess::Color::Black
+            };
+            cozy_chess::get_pawn_attacks(square, color).0
+        }
+
+        fn knight_attacks(_: u64) -> u64 {
+            unreachable!()
+        }
+        fn bishop_attacks(_: u64, _: u64) -> u64 {
+            unreachable!()
+        }
+        fn rook_attacks(_: u64, _: u64) -> u64 {
+            unreachable!()
+        }
+        fn queen_attacks(_: u64, _: u64) -> u64 {
+            unreachable!()
+        }
+        fn king_attacks(_: u64) -> u64 {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn double_push_retains_ep_only_for_an_opposing_capturer() {
+        // The reverse lookup uses the mover's attack direction from the EP
+        // square. These are move-state transitions, not root-move fixtures.
+        assert_eq!(ep_after_double_push::<AttackOnly>(8, 24, true, 1 << 25), 16);
+        assert_eq!(
+            ep_after_double_push::<AttackOnly>(15, 31, true, 1 << 30),
+            23
+        );
+        assert_eq!(
+            ep_after_double_push::<AttackOnly>(53, 37, false, 1 << 36),
+            45
+        );
+        assert_eq!(
+            ep_after_double_push::<AttackOnly>(48, 32, false, 1 << 33),
+            40
+        );
+        assert_eq!(ep_after_double_push::<AttackOnly>(8, 24, true, 0), 0);
+        assert_eq!(ep_after_double_push::<AttackOnly>(8, 24, true, 1 << 9), 0);
+        assert_eq!(ep_after_double_push::<AttackOnly>(8, 16, true, 1 << 25), 0);
+    }
 }
 
 pub(crate) unsafe fn pyrrhic_legal_move<E: EngineAdapter>(

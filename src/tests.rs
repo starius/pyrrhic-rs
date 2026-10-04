@@ -152,6 +152,40 @@ fn wdl_only_directory_does_not_claim_dtz_coverage() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn absolute_windows_drive_path_loads() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-drive-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+    let path = dir.to_str().unwrap();
+    assert!(path.contains(':'));
+    let tb = TableBases::<CozyChessAdapter>::new(path).unwrap();
+    assert_eq!(tb.max_pieces(), 3);
+    drop(tb);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_path_list_keeps_colon_separator() {
+    let first = std::env::temp_dir().join(format!("pyrrhic-path-a-{}", std::process::id()));
+    let second = std::env::temp_dir().join(format!("pyrrhic-path-b-{}", std::process::id()));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::File::create(second.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let path = format!("{}:{}", first.display(), second.display());
+    let tb = TableBases::<CozyChessAdapter>::new(&path).unwrap();
+    assert_eq!(tb.max_pieces(), 3);
+    drop(tb);
+    std::fs::remove_dir_all(first).unwrap();
+    std::fs::remove_dir_all(second).unwrap();
+}
+
 #[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";

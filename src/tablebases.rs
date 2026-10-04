@@ -101,12 +101,10 @@ static TB_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 impl<E: EngineAdapter> TableBases<E> {
     /// Initialize the tablebases
-    /// * `path` - a colon-seperated list of file paths to search for tablebase files in e.g. "./syzygy/tb345:./syzygy/tb6:./syzygy/tb7"
+    /// * `path` - tablebase directories separated by ':' on Unix or ';' on Windows.
     ///
     /// ## Notes:
-    /// On windows, Pyrrhic's use of colons causes issues due to drive letters in windows absolute paths e.g. `C:\Program Files`.
-    /// A workaround is to use relative paths, or ensure your engine executable and tablebases are on the same drive and use the
-    /// `\Program Files` path format.
+    /// Absolute paths with Windows drive letters are accepted.
     ///
     /// ## Errors:
     /// This function will return `[TBError::AlreadyInitialized]` if another `TableBases` instance has already been created. To get multiple

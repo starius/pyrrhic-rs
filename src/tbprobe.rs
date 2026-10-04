@@ -228,6 +228,8 @@ unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
 static TB_MUTEX: Mutex<()> = Mutex::new(());
 static mut initialized: i32 = 0;
 static mut numPaths: i32 = 0;
+// Windows drive letters contain ':', so its tablebase path list uses ';'.
+const PATH_SEPARATOR: i32 = if cfg!(windows) { ';' as i32 } else { ':' as i32 };
 static mut pathString: *mut c_char = 0 as *const c_char as *mut c_char;
 static mut paths: *mut *mut c_char = 0 as *const *mut c_char as *mut *mut c_char;
 
@@ -1402,11 +1404,11 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     numPaths = 0;
     let mut i_1: i32 = 0;
     loop {
-        if *pathString.offset(i_1 as isize) as i32 != ':' as i32 {
+        if *pathString.offset(i_1 as isize) as i32 != PATH_SEPARATOR {
             numPaths += 1;
         }
         while *pathString.offset(i_1 as isize) as i32 != 0
-            && *pathString.offset(i_1 as isize) as i32 != ':' as i32
+            && *pathString.offset(i_1 as isize) as i32 != PATH_SEPARATOR
         {
             i_1 += 1;
         }

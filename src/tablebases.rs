@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     engine_adapter::{Color, EngineAdapter, Piece},
-    tbprobe::{self, tb_init, tb_probe_root, tb_probe_wdl, StateOwner},
+    tbprobe::{self, tb_init, tb_probe_root, tb_probe_wdl, Generation},
 };
 
 /// Tablebase error type
@@ -84,7 +84,7 @@ pub struct DtzProbeResult {
 /// safely sent across threads and manages initialization and de-initialization of the tablebases.
 #[derive(Clone)]
 pub struct TableBases<E: EngineAdapter> {
-    handle: Arc<StateOwner>,
+    handle: Arc<Generation>,
     _engine: PhantomData<E>,
 }
 
@@ -176,12 +176,9 @@ impl<E: EngineAdapter> TableBases<E> {
     /// Absolute paths with Windows drive letters are accepted.
     ///
     pub fn new<P: AsRef<str>>(path: P) -> Result<Self, TBError> {
-        let handle = Arc::new(StateOwner::new());
-        {
-            let _scope = handle.enter();
-            if !unsafe { tb_init(path.as_ref()) } {
-                return Err(TBError::InitFailed);
-            }
+        let handle = Arc::new(Generation::new());
+        if !unsafe { tb_init(handle.as_ref(), path.as_ref()) } {
+            return Err(TBError::InitFailed);
         }
         if handle.max_pieces() == 0 {
             return Err(TBError::BadPath);
@@ -212,10 +209,19 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        let _scope = self.handle.enter();
         let result = unsafe {
             tb_probe_wdl::<E>(
-                white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+                self.handle.as_ref(),
+                white,
+                black,
+                kings,
+                queens,
+                rooks,
+                bishops,
+                knights,
+                pawns,
+                ep,
+                turn,
             )
         };
 
@@ -250,10 +256,19 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        let _scope = self.handle.enter();
         unsafe {
             tbprobe::tb_probe_dtz::<E>(
-                white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+                self.handle.as_ref(),
+                white,
+                black,
+                kings,
+                queens,
+                rooks,
+                bishops,
+                knights,
+                pawns,
+                ep,
+                turn,
             )
         }
         .ok_or(TBError::ProbeFailed)
@@ -286,11 +301,11 @@ impl<E: EngineAdapter> TableBases<E> {
         {
             return Err(TBError::ProbeFailed);
         }
-        let _scope = self.handle.enter();
         let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
         let mut results = [0u32; 256];
         let result = unsafe {
             tb_probe_root::<E>(
+                self.handle.as_ref(),
                 white,
                 black,
                 kings,

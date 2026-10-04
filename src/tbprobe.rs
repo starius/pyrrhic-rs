@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     ffi::{CStr, CString},
     fs::{File, OpenOptions},
     os::raw::c_char,
@@ -285,7 +285,7 @@ const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 /// One immutable discovery set with lazily initialized, synchronized mappings.
 /// The entry arrays are allocated once and their addresses remain stable until
 /// the final handle is dropped.
-pub(crate) struct RawState {
+pub(crate) struct GenerationData {
     paths: Vec<PathBuf>,
     discovered: Vec<(String, bool)>,
     pub(crate) max_cardinality: i32,
@@ -299,7 +299,7 @@ pub(crate) struct RawState {
     hash: [TbHashEntry; 4096],
 }
 
-impl Default for RawState {
+impl Default for GenerationData {
     fn default() -> Self {
         Self {
             paths: Vec::new(),
@@ -320,16 +320,15 @@ impl Default for RawState {
     }
 }
 
-pub(crate) struct StateOwner(UnsafeCell<RawState>);
+pub(crate) struct Generation(UnsafeCell<GenerationData>);
 
-impl StateOwner {
+impl Generation {
     pub(crate) fn new() -> Self {
-        Self(UnsafeCell::new(RawState::default()))
+        Self(UnsafeCell::new(GenerationData::default()))
     }
 
-    pub(crate) fn enter(&self) -> StateScope<'_> {
-        let previous = ACTIVE_STATE.with(|active| active.replace(self.0.get()));
-        StateScope(previous, std::marker::PhantomData)
+    fn state_ptr(&self) -> *mut GenerationData {
+        self.0.get()
     }
 
     pub(crate) fn max_pieces(&self) -> u32 {
@@ -350,47 +349,25 @@ impl StateOwner {
     }
 }
 
-// Discovery finishes before a StateOwner is shared. The hash, paths, and
+// Discovery finishes before a Generation is shared. The hash, paths, and
 // counts are then read-only. Lazy mapping writes stable entries under TB_MUTEX
 // and publishes decoded data through their ready atomics. Arc destruction
 // occurs after every active probe and clone has released the owner.
-unsafe impl Send for StateOwner {}
-unsafe impl Sync for StateOwner {}
+unsafe impl Send for Generation {}
+unsafe impl Sync for Generation {}
 
-impl Drop for StateOwner {
+impl Drop for Generation {
     fn drop(&mut self) {
-        let _scope = self.enter();
-        unsafe { tb_free() };
+        unsafe { tb_free(self) };
     }
-}
-
-thread_local! {
-    static ACTIVE_STATE: Cell<*mut RawState> = const { Cell::new(std::ptr::null_mut()) };
-}
-
-pub(crate) struct StateScope<'a>(*mut RawState, std::marker::PhantomData<&'a StateOwner>);
-
-impl Drop for StateScope<'_> {
-    fn drop(&mut self) {
-        ACTIVE_STATE.with(|active| active.set(self.0));
-    }
-}
-
-#[inline]
-unsafe fn active_state() -> *mut RawState {
-    let state = ACTIVE_STATE.with(Cell::get);
-    debug_assert!(
-        !state.is_null(),
-        "Pyrrhic probe used without a tablebase owner"
-    );
-    state
 }
 
 unsafe fn open_tb(
+    owner: &Generation,
     mut str: *const c_char,
     mut suffix: *const c_char,
 ) -> Result<File, std::io::Error> {
-    let state = active_state();
+    let state = owner.state_ptr();
     for path in &(*state).paths {
         let str = CStr::from_ptr(str);
         let suffix = CStr::from_ptr(suffix);
@@ -1128,6 +1105,7 @@ unsafe fn dtz_to_wdl(mut cnt50: i32, mut dtz: i32) -> u32 {
     (wdl + 2) as u32
 }
 pub(crate) unsafe fn tb_probe_wdl<E: EngineAdapter>(
+    owner: &Generation,
     mut white: u64,
     mut black: u64,
     mut kings: u64,
@@ -1155,7 +1133,7 @@ pub(crate) unsafe fn tb_probe_wdl<E: EngineAdapter>(
         }
     };
     let mut success: i32 = 0;
-    let mut v: i32 = probe_wdl::<E>(&mut pos, &mut success);
+    let mut v: i32 = probe_wdl::<E>(owner, &mut pos, &mut success);
     if success == 0 {
         return 0xffffffff;
     }
@@ -1165,6 +1143,7 @@ pub(crate) unsafe fn tb_probe_wdl<E: EngineAdapter>(
 /// Signed DTZ from the side to move, without applying a halfmove clock.
 /// The caller can combine this with its own rule-50 policy.
 pub(crate) unsafe fn tb_probe_dtz<E: EngineAdapter>(
+    owner: &Generation,
     white: u64,
     black: u64,
     kings: u64,
@@ -1190,10 +1169,11 @@ pub(crate) unsafe fn tb_probe_dtz<E: EngineAdapter>(
         turn,
     };
     let mut success = 0;
-    let dtz = probe_dtz::<E>(&mut pos, &mut success);
+    let dtz = probe_dtz::<E>(owner, &mut pos, &mut success);
     (success != 0).then_some(dtz)
 }
 pub(crate) unsafe fn tb_probe_root<E: EngineAdapter>(
+    owner: &Generation,
     mut white: u64,
     mut black: u64,
     mut kings: u64,
@@ -1223,7 +1203,7 @@ pub(crate) unsafe fn tb_probe_root<E: EngineAdapter>(
         }
     };
     let mut dtz: i32 = 0;
-    let mut move_0: PyrrhicMove = probe_root::<E>(&mut pos, &mut dtz, results);
+    let mut move_0: PyrrhicMove = probe_root::<E>(owner, &mut pos, &mut dtz, results);
     if move_0 as i32 == 0 {
         return 0xffffffff;
     }
@@ -1277,8 +1257,8 @@ unsafe fn prt_str(mut pos: *const PyrrhicPosition, mut str: *mut c_char, mut fli
     str = str.offset(1);
     *fresh9 = 0;
 }
-unsafe fn test_tb(mut str: *const c_char, mut suffix: *const c_char) -> i32 {
-    let mut file = open_tb(str, suffix);
+unsafe fn test_tb(owner: &Generation, mut str: *const c_char, mut suffix: *const c_char) -> i32 {
+    let mut file = open_tb(owner, str, suffix);
     if let Ok(file) = file {
         let Ok(metadata) = file.metadata() else {
             return -1;
@@ -1301,11 +1281,12 @@ unsafe fn test_tb(mut str: *const c_char, mut suffix: *const c_char) -> i32 {
     }
 }
 unsafe fn map_tb(
+    owner: &Generation,
     mut name: *const c_char,
     mut suffix: *const c_char,
     mut mapping: *mut u64,
 ) -> *mut Mmap {
-    let mut file = open_tb(name, suffix);
+    let mut file = open_tb(owner, name, suffix);
     if file.is_err() {
         return std::ptr::null_mut();
     }
@@ -1315,17 +1296,17 @@ unsafe fn map_tb(
     close_tb(file);
     data
 }
-unsafe fn add_to_hash(entry: EntryIndex, key: u64) {
+unsafe fn add_to_hash(owner: &Generation, entry: EntryIndex, key: u64) {
     let mut idx: i32 = 0;
     idx = (key >> (64 - 12)) as i32;
-    while (*active_state()).hash[idx as usize].entry.is_some() {
+    while (*owner.state_ptr()).hash[idx as usize].entry.is_some() {
         idx = (idx + 1) & ((1 << 12) - 1);
     }
-    (*active_state()).hash[idx as usize].key = key;
-    (*active_state()).hash[idx as usize].entry = Some(entry);
+    (*owner.state_ptr()).hash[idx as usize].key = key;
+    (*owner.state_ptr()).hash[idx as usize].entry = Some(entry);
 }
-unsafe fn init_tb(mut str: *const c_char) {
-    if test_tb(str, TB_SUFFIX[WDL as i32 as usize]) != 1 {
+unsafe fn init_tb(owner: &Generation, mut str: *const c_char) {
+    if test_tb(owner, str, TB_SUFFIX[WDL as i32 as usize]) != 1 {
         return;
     }
     let mut pcs: [i32; 16] = [0; 16];
@@ -1353,17 +1334,17 @@ unsafe fn init_tb(mut str: *const c_char) {
     let mut hasPawns: bool =
         pcs[PYRRHIC_WPAWN as i32 as usize] != 0 || pcs[PYRRHIC_BPAWN as i32 as usize] != 0;
     let entry = if hasPawns as i32 != 0 {
-        let fresh10 = (*active_state()).num_pawn;
-        (*active_state()).num_pawn += 1;
+        let fresh10 = (*owner.state_ptr()).num_pawn;
+        (*owner.state_ptr()).num_pawn += 1;
         EntryIndex::Pawn(fresh10 as usize)
     } else {
-        let fresh11 = (*active_state()).num_piece;
-        (*active_state()).num_piece += 1;
+        let fresh11 = (*owner.state_ptr()).num_piece;
+        (*owner.state_ptr()).num_piece += 1;
         EntryIndex::Piece(fresh11 as usize)
     };
     let be: *mut BaseEntry = match entry {
-        EntryIndex::Piece(index) => &mut (*active_state()).piece_entry[index].be,
-        EntryIndex::Pawn(index) => &mut (*active_state()).pawn_entry[index].be,
+        EntryIndex::Piece(index) => &mut (*owner.state_ptr()).piece_entry[index].be,
+        EntryIndex::Pawn(index) => &mut (*owner.state_ptr()).pawn_entry[index].be,
     };
     (*be).hasPawns = hasPawns;
     (*be).key = key;
@@ -1374,15 +1355,15 @@ unsafe fn init_tb(mut str: *const c_char) {
         (*be).num = ((*be).num as i32 + pcs[i_0 as usize]) as u8;
         i_0 += 1;
     }
-    (*active_state()).num_wdl += 1;
-    (*be).hasDtz = test_tb(str, TB_SUFFIX[DTZ as i32 as usize]) == 1;
-    (*active_state()).num_dtz += (*be).hasDtz as i32;
-    (*active_state()).discovered.push((
+    (*owner.state_ptr()).num_wdl += 1;
+    (*be).hasDtz = test_tb(owner, str, TB_SUFFIX[DTZ as i32 as usize]) == 1;
+    (*owner.state_ptr()).num_dtz += (*be).hasDtz as i32;
+    (*owner.state_ptr()).discovered.push((
         CStr::from_ptr(str).to_string_lossy().into_owned(),
         (*be).hasDtz,
     ));
-    if (*be).num as i32 > (*active_state()).max_cardinality {
-        (*active_state()).max_cardinality = (*be).num as i32;
+    if (*be).num as i32 > (*owner.state_ptr()).max_cardinality {
+        (*owner.state_ptr()).max_cardinality = (*be).num as i32;
     }
     for table_type in 0..2 {
         (*be).ready[table_type] = AtomicBool::new(false);
@@ -1410,9 +1391,9 @@ unsafe fn init_tb(mut str: *const c_char) {
             (*be).c2rust_unnamed.pawns[1] = tmp as u8;
         }
     }
-    add_to_hash(entry, key);
+    add_to_hash(owner, entry, key);
     if key != key2 {
-        add_to_hash(entry, key2);
+        add_to_hash(owner, entry, key2);
     }
 }
 
@@ -1458,12 +1439,12 @@ unsafe fn free_tb_entry(be: *mut BaseEntry) {
     }
 }
 
-pub(crate) unsafe fn tb_init(path: &str) -> bool {
+pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
     INDICES_INIT.call_once(|| unsafe { init_indices() });
     if path.is_empty() || path == "<empty>" {
         return true;
     }
-    let state = active_state();
+    let state = owner.state_ptr();
     for component in path
         .split(PATH_SEPARATOR)
         .filter(|component| !component.is_empty())
@@ -1495,7 +1476,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - i_4) as usize] as u8 as char
         ))
         .unwrap();
-        init_tb(str.as_ptr());
+        init_tb(owner, str.as_ptr());
         i_4 += 1;
     }
     i_4 = 0;
@@ -1508,7 +1489,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                 pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - j_0) as usize] as u8 as char,
             ))
             .unwrap();
-            init_tb(str.as_ptr());
+            init_tb(owner, str.as_ptr());
             j_0 += 1;
         }
         i_4 += 1;
@@ -1523,7 +1504,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                 pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - j_0) as usize] as u8 as char,
             ))
             .unwrap();
-            init_tb(str.as_ptr());
+            init_tb(owner, str.as_ptr());
             j_0 += 1;
         }
         i_4 += 1;
@@ -1541,7 +1522,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - k) as usize] as u8 as char,
                 ))
                 .unwrap();
-                init_tb(str.as_ptr());
+                init_tb(owner, str.as_ptr());
                 k += 1;
             }
             j_0 += 1;
@@ -1561,7 +1542,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                     pyrrhic_piece_to_char[(PYRRHIC_QUEEN as i32 - k) as usize] as u8 as char,
                 ))
                 .unwrap();
-                init_tb(str.as_ptr());
+                init_tb(owner, str.as_ptr());
                 k += 1;
             }
             j_0 += 1;
@@ -1589,7 +1570,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr());
+                        init_tb(owner, str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1618,7 +1599,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr());
+                        init_tb(owner, str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1647,7 +1628,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                 as char,
                         ))
                         .unwrap();
-                        init_tb(str.as_ptr());
+                        init_tb(owner, str.as_ptr());
                         l += 1;
                     }
                     k += 1;
@@ -1680,7 +1661,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr());
+                            init_tb(owner, str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -1715,7 +1696,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr());
+                            init_tb(owner, str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -1750,7 +1731,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
                                     as char,
                             ))
                             .unwrap();
-                            init_tb(str.as_ptr());
+                            init_tb(owner, str.as_ptr());
                             m += 1;
                         }
                         l += 1;
@@ -1762,12 +1743,12 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             i_4 += 1;
         }
     }
-    (*active_state()).largest = (*active_state()).max_cardinality;
+    (*owner.state_ptr()).largest = (*owner.state_ptr()).max_cardinality;
     1 != 0
 }
 
-pub(crate) unsafe fn tb_free() {
-    let state = active_state();
+pub(crate) unsafe fn tb_free(owner: &Generation) {
+    let state = owner.state_ptr();
     for i in 0..(*state).num_piece {
         free_tb_entry(&mut (*state).piece_entry[i as usize].be);
     }
@@ -2401,8 +2382,14 @@ unsafe fn setup_pairs(
     }
     d
 }
-unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> bool {
+unsafe fn init_table(
+    owner: &Generation,
+    be: *mut BaseEntry,
+    str: *const c_char,
+    type_0: i32,
+) -> bool {
     let mut mmap = map_tb(
+        owner,
         str,
         TB_SUFFIX[type_0 as usize],
         (&raw mut (*be).mapping)
@@ -2665,12 +2652,13 @@ unsafe fn fill_squares(
 }
 
 pub(crate) unsafe fn probe_table(
+    owner: &Generation,
     mut pos: *const PyrrhicPosition,
     mut s: i32,
     mut success: *mut i32,
     type_0: i32,
 ) -> i32 {
-    let state = active_state();
+    let state = owner.state_ptr();
     let mut key: u64 = pyrrhic_calc_key(pos, 0);
     if type_0 == WDL as i32 && key == 0 {
         return 0;
@@ -2703,7 +2691,7 @@ pub(crate) unsafe fn probe_table(
         {
             let mut str: [c_char; 16] = [0; 16];
             prt_str(pos, str.as_mut_ptr(), ((*be).key != key) as i32);
-            if !init_table(be, str.as_mut_ptr(), type_0) {
+            if !init_table(owner, be, str.as_mut_ptr(), type_0) {
                 (*be).failed[type_0 as usize].store(true, Ordering::Release);
                 *success = 0;
                 drop(lock);
@@ -2821,17 +2809,23 @@ pub(crate) unsafe fn probe_table(
     }
     v
 }
-unsafe fn probe_wdl_table(mut pos: *const PyrrhicPosition, mut success: *mut i32) -> i32 {
-    probe_table(pos, 0, success, WDL as i32)
+unsafe fn probe_wdl_table(
+    owner: &Generation,
+    mut pos: *const PyrrhicPosition,
+    mut success: *mut i32,
+) -> i32 {
+    probe_table(owner, pos, 0, success, WDL as i32)
 }
 unsafe fn probe_dtz_table(
+    owner: &Generation,
     mut pos: *const PyrrhicPosition,
     mut wdl: i32,
     mut success: *mut i32,
 ) -> i32 {
-    probe_table(pos, wdl, success, DTZ as i32)
+    probe_table(owner, pos, wdl, success, DTZ as i32)
 }
 unsafe fn probe_ab<E: EngineAdapter>(
+    owner: &Generation,
     mut pos: *const PyrrhicPosition,
     mut alpha: i32,
     mut beta: i32,
@@ -2857,7 +2851,7 @@ unsafe fn probe_ab<E: EngineAdapter>(
         };
         let mut move_0: PyrrhicMove = *m;
         if pyrrhic_is_capture(pos, move_0) && pyrrhic_do_move::<E>(&mut pos1, pos, move_0) {
-            let mut v: i32 = -probe_ab::<E>(&pos1, -beta, -alpha, success);
+            let mut v: i32 = -probe_ab::<E>(owner, &pos1, -beta, -alpha, success);
             if *success == 0 {
                 return 0;
             }
@@ -2870,14 +2864,18 @@ unsafe fn probe_ab<E: EngineAdapter>(
         }
         m = m.offset(1);
     }
-    let mut v_0: i32 = probe_wdl_table(pos, success);
+    let mut v_0: i32 = probe_wdl_table(owner, pos, success);
     if alpha >= v_0 {
         alpha
     } else {
         v_0
     }
 }
-unsafe fn probe_wdl<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success: *mut i32) -> i32 {
+unsafe fn probe_wdl<E: EngineAdapter>(
+    owner: &Generation,
+    mut pos: *mut PyrrhicPosition,
+    mut success: *mut i32,
+) -> i32 {
     *success = 1;
     let mut moves0: [PyrrhicMove; 64] = [0; 64];
     let mut m: *mut PyrrhicMove = moves0.as_mut_ptr();
@@ -2900,7 +2898,7 @@ unsafe fn probe_wdl<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
         };
         let mut move_0: PyrrhicMove = *m;
         if pyrrhic_is_capture(pos, move_0) && pyrrhic_do_move::<E>(&mut pos1, pos, move_0) {
-            let mut v: i32 = -probe_ab::<E>(&pos1, -2, -bestCap, success);
+            let mut v: i32 = -probe_ab::<E>(owner, &pos1, -2, -bestCap, success);
             if *success == 0 {
                 return 0;
             }
@@ -2918,7 +2916,7 @@ unsafe fn probe_wdl<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
         }
         m = m.offset(1);
     }
-    let mut v_0: i32 = probe_wdl_table(pos, success);
+    let mut v_0: i32 = probe_wdl_table(owner, pos, success);
     if *success == 0 {
         return 0;
     }
@@ -2951,8 +2949,12 @@ unsafe fn probe_wdl<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
     v_0
 }
 const WDL_TO_DTZ: [i32; 5] = [-1, -101, 0, 101, 1];
-unsafe fn probe_dtz<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success: *mut i32) -> i32 {
-    let mut wdl: i32 = probe_wdl::<E>(pos, success);
+unsafe fn probe_dtz<E: EngineAdapter>(
+    owner: &Generation,
+    mut pos: *mut PyrrhicPosition,
+    mut success: *mut i32,
+) -> i32 {
+    let mut wdl: i32 = probe_wdl::<E>(owner, pos, success);
     if *success == 0 {
         return 0;
     }
@@ -2986,7 +2988,7 @@ unsafe fn probe_dtz<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
             if !(!pyrrhic_is_pawn_move(pos, move_0) || pyrrhic_is_capture(pos, move_0) as i32 != 0)
                 && pyrrhic_do_move::<E>(&mut pos1, pos, move_0)
             {
-                let mut v: i32 = -probe_wdl::<E>(&mut pos1, success);
+                let mut v: i32 = -probe_wdl::<E>(owner, &mut pos1, success);
                 if *success == 0 {
                     return 0;
                 }
@@ -2998,7 +3000,7 @@ unsafe fn probe_dtz<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
             m = m.offset(1);
         }
     }
-    let mut dtz: i32 = probe_dtz_table(pos, wdl, success);
+    let mut dtz: i32 = probe_dtz_table(owner, pos, wdl, success);
     if *success >= 0 {
         return WDL_TO_DTZ[(wdl + 2) as usize] + (if wdl > 0 { dtz } else { -dtz });
     }
@@ -3017,7 +3019,7 @@ unsafe fn probe_dtz<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
             || pyrrhic_is_pawn_move(pos, move_1) as i32 != 0)
             && pyrrhic_do_move::<E>(&mut pos1, pos, move_1)
         {
-            let mut v_0: i32 = -probe_dtz::<E>(&mut pos1, success);
+            let mut v_0: i32 = -probe_dtz::<E>(owner, &mut pos1, success);
             if v_0 == 1 && pyrrhic_is_mate::<E>(&pos1) as i32 != 0 {
                 best = 1;
             } else if wdl > 0 {
@@ -3037,12 +3039,13 @@ unsafe fn probe_dtz<E: EngineAdapter>(mut pos: *mut PyrrhicPosition, mut success
 }
 
 unsafe fn probe_root<E: EngineAdapter>(
+    owner: &Generation,
     mut pos: *mut PyrrhicPosition,
     mut score: *mut i32,
     mut results: *mut u32,
 ) -> u16 {
     let mut success: i32 = 0;
-    let mut dtz: i32 = probe_dtz::<E>(pos, &mut success);
+    let mut dtz: i32 = probe_dtz::<E>(owner, pos, &mut success);
     if success == 0 {
         return 0;
     }
@@ -3075,14 +3078,14 @@ unsafe fn probe_root<E: EngineAdapter>(
             if dtz > 0 && pyrrhic_is_mate::<E>(&pos1) as i32 != 0 {
                 v = 1;
             } else if pos1.rule50 as i32 != 0 {
-                v = -probe_dtz::<E>(&mut pos1, &mut success);
+                v = -probe_dtz::<E>(owner, &mut pos1, &mut success);
                 if v > 0 {
                     v += 1;
                 } else if v < 0 {
                     v -= 1;
                 }
             } else {
-                v = -probe_wdl::<E>(&mut pos1, &mut success);
+                v = -probe_wdl::<E>(owner, &mut pos1, &mut success);
                 v = WDL_TO_DTZ[(v + 2) as usize];
             }
             num_draw = num_draw.wrapping_add((v == 0) as i32 as u64);
@@ -3191,10 +3194,9 @@ mod initialization_tests {
         }
 
         {
-            let owner = StateOwner::new();
-            let _scope = owner.enter();
-            assert!(unsafe { tb_init(dir.to_str().unwrap()) });
-            let state = unsafe { &*active_state() };
+            let owner = Generation::new();
+            assert!(unsafe { tb_init(&owner, dir.to_str().unwrap()) });
+            let state = unsafe { &*owner.state_ptr() };
             assert!(state.num_piece > 0);
             assert!(state.num_pawn > 0);
             assert_eq!(state.piece_entry.len(), 650);

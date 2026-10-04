@@ -5,7 +5,8 @@ use std::{
 
 use crate::{
     engine_adapter::{Color, EngineAdapter, Piece},
-    tbprobe::{self, tb_init, tb_probe_root, tb_probe_wdl, Generation},
+    table_probe::{probe_dtz_public, probe_root_public, probe_wdl_public},
+    tbprobe::{tb_init, Generation, PyrrhicPosition},
 };
 
 /// Tablebase error type
@@ -209,21 +210,21 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        let result = unsafe {
-            tb_probe_wdl::<E>(
-                self.handle.as_ref(),
-                white,
-                black,
-                kings,
-                queens,
-                rooks,
-                bishops,
-                knights,
-                pawns,
-                ep,
-                turn,
-            )
+        let position = PyrrhicPosition {
+            white,
+            black,
+            kings,
+            queens,
+            rooks,
+            bishops,
+            knights,
+            pawns,
+            rule50: 0,
+            ep: ep as u8,
+            turn,
         };
+        let result = probe_wdl_public::<E>(self.handle.as_ref(), &position)
+            .map_err(|_| TBError::ProbeFailed)?;
 
         match result {
             0 => Ok(WdlProbeResult::Loss),
@@ -256,22 +257,20 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        unsafe {
-            tbprobe::tb_probe_dtz::<E>(
-                self.handle.as_ref(),
-                white,
-                black,
-                kings,
-                queens,
-                rooks,
-                bishops,
-                knights,
-                pawns,
-                ep,
-                turn,
-            )
-        }
-        .ok_or(TBError::ProbeFailed)
+        let position = PyrrhicPosition {
+            white,
+            black,
+            kings,
+            queens,
+            rooks,
+            bishops,
+            knights,
+            pawns,
+            rule50: 0,
+            ep: ep as u8,
+            turn,
+        };
+        probe_dtz_public::<E>(self.handle.as_ref(), &position).map_err(|_| TBError::ProbeFailed)
     }
 
     /// Probe the Distance-To-Zero (DTZ) tables.
@@ -302,26 +301,23 @@ impl<E: EngineAdapter> TableBases<E> {
             return Err(TBError::ProbeFailed);
         }
         let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
-        let mut results = [0u32; 256];
-        let result = unsafe {
-            tb_probe_root::<E>(
-                self.handle.as_ref(),
-                white,
-                black,
-                kings,
-                queens,
-                rooks,
-                bishops,
-                knights,
-                pawns,
-                rule50,
-                ep,
-                turn,
-                results.as_mut_ptr(),
-            )
+        let position = PyrrhicPosition {
+            white,
+            black,
+            kings,
+            queens,
+            rooks,
+            bishops,
+            knights,
+            pawns,
+            rule50: rule50 as u8,
+            ep: ep as u8,
+            turn,
         };
+        let packed = probe_root_public::<E>(self.handle.as_ref(), &position)
+            .map_err(|_| TBError::ProbeFailed)?;
 
-        let result = extract_dtz_result(result);
+        let result = extract_dtz_result(packed.code);
         let mut dtz_data = DtzProbeResult {
             root: result,
             moves: [DtzProbeValue::Failed; 256],
@@ -331,14 +327,9 @@ impl<E: EngineAdapter> TableBases<E> {
             DtzProbeValue::Failed => return Err(TBError::ProbeFailed),
             DtzProbeValue::Stalemate | DtzProbeValue::Checkmate => Ok(dtz_data),
             DtzProbeValue::DtzResult(_) => {
-                for value in results.map(extract_dtz_result) {
-                    match value {
-                        DtzProbeValue::Failed => break,
-                        other => {
-                            dtz_data.moves[dtz_data.num_moves] = other;
-                            dtz_data.num_moves += 1;
-                        }
-                    }
+                for &packed_move in &packed.moves[..packed.len] {
+                    dtz_data.moves[dtz_data.num_moves] = extract_dtz_result(packed_move);
+                    dtz_data.num_moves += 1;
                 }
                 Ok(dtz_data)
             }

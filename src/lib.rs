@@ -22,6 +22,8 @@ mod table_decoder;
 mod table_encoder;
 mod table_moves;
 mod table_parser;
+mod table_position;
+mod table_probe;
 mod tbprobe;
 
 pub mod tablebases;

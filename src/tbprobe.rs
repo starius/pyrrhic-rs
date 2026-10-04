@@ -1442,26 +1442,32 @@ pub(crate) unsafe fn num_tables(be: *mut BaseEntry, type_0: i32) -> i32 {
 }
 
 pub(crate) unsafe fn first_ei(be: *mut BaseEntry, type_0: i32) -> *mut EncInfo {
+    // WDL and DTZ probes may read this array concurrently. Keep the pointer
+    // raw: taking &mut to the whole array would claim exclusive access.
     if (*be).hasPawns as i32 != 0 {
-        &mut *((*(be as *mut PawnEntry)).ei).as_mut_ptr().offset(
-            (if type_0 == WDL as i32 {
-                0
-            } else if type_0 == DTM as i32 {
-                8
-            } else {
-                20
-            }) as isize,
-        ) as *mut EncInfo
+        (&raw mut (*(be as *mut PawnEntry)).ei)
+            .cast::<EncInfo>()
+            .offset(
+                (if type_0 == WDL as i32 {
+                    0
+                } else if type_0 == DTM as i32 {
+                    8
+                } else {
+                    20
+                }) as isize,
+            )
     } else {
-        &mut *((*(be as *mut PieceEntry)).ei).as_mut_ptr().offset(
-            (if type_0 == WDL as i32 {
-                0
-            } else if type_0 == DTM as i32 {
-                2
-            } else {
-                4
-            }) as isize,
-        ) as *mut EncInfo
+        (&raw mut (*(be as *mut PieceEntry)).ei)
+            .cast::<EncInfo>()
+            .offset(
+                (if type_0 == WDL as i32 {
+                    0
+                } else if type_0 == DTM as i32 {
+                    2
+                } else {
+                    4
+                }) as isize,
+            )
     }
 }
 unsafe fn free_tb_entry(be: *mut BaseEntry) {
@@ -2434,17 +2440,17 @@ unsafe fn setup_pairs(
     ) as *mut PairsData;
     (*d).blockSize = blockSize;
     (*d).idxBits = idxBits;
-    (*d).offset = &mut *data.offset(10) as *mut u8 as *mut u16;
+    (*d).offset = data.offset(10) as *mut u16;
     (*d).symLen = (d as *mut u8)
         .offset(::core::mem::size_of::<PairsData>() as u64 as isize)
         .offset((h as u64).wrapping_mul(::core::mem::size_of::<u64>() as u64) as isize);
-    (*d).symPat = &mut *data.offset((12 + 2 * h) as isize) as *mut u8;
+    (*d).symPat = data.offset((12 + 2 * h) as isize);
     (*d).minLen = minLen as u8;
-    *ptr = &mut *data.offset(
+    *ptr = data.offset(
         ((12 + 2 * h) as u32)
             .wrapping_add(3 * numSyms)
             .wrapping_add(numSyms & 1) as isize,
-    ) as *mut u8;
+    );
     let mut num_indices: u64 = (tb_size)
         .wrapping_add((1) << idxBits as i32)
         .wrapping_sub(1)
@@ -2462,33 +2468,34 @@ unsafe fn setup_pairs(
         }
         s = s.wrapping_add(1);
     }
-    *((*d).base).as_mut_ptr().offset((h - 1) as isize) = 0;
+    let base = (&raw mut (*d).base).cast::<u64>();
+    *base.offset((h - 1) as isize) = 0;
     let mut i: i32 = h - 2;
     while i >= 0 {
-        *((*d).base).as_mut_ptr().offset(i as isize) =
-            (*((*d).base).as_mut_ptr().offset((i + 1) as isize))
-                .wrapping_add(read_le_u16(
-                    ((*d).offset).offset(i as isize) as *mut u8 as *mut libc::c_void
-                ) as u64)
-                .wrapping_sub(read_le_u16(
-                    ((*d).offset).offset(i as isize).offset(1) as *mut u8 as *mut libc::c_void
-                ) as u64)
-                / 2;
+        *base.offset(i as isize) = (*base.offset((i + 1) as isize))
+            .wrapping_add(read_le_u16(
+                ((*d).offset).offset(i as isize) as *mut u8 as *mut libc::c_void
+            ) as u64)
+            .wrapping_sub(read_le_u16(
+                ((*d).offset).offset(i as isize).offset(1) as *mut u8 as *mut libc::c_void
+            ) as u64)
+            / 2;
         i -= 1;
     }
     let mut i_0: i32 = 0;
     while i_0 < h {
-        *((*d).base).as_mut_ptr().offset(i_0 as isize) <<= 64 - (minLen + i_0);
+        *base.offset(i_0 as isize) <<= 64 - (minLen + i_0);
         i_0 += 1;
     }
-    (*d).offset = ((*d).offset).offset(-((*d).minLen as i32 as isize));
     d
 }
 unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> bool {
     let mut mmap = map_tb(
         str,
         TB_SUFFIX[type_0 as usize],
-        &mut *((*be).mapping).as_mut_ptr().offset(type_0 as isize),
+        (&raw mut (*be).mapping)
+            .cast::<u64>()
+            .offset(type_0 as isize),
     );
     if mmap.is_null() {
         return false;
@@ -2685,9 +2692,9 @@ unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> boo
     }
     true
 }
-unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *mut u8 {
+unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *const u8 {
     if (*d).idxBits == 0 {
-        return ((*d).constValue).as_mut_ptr();
+        return (&raw const (*d).constValue).cast::<u8>();
     }
     let mut mainIdx: u32 = (idx >> (*d).idxBits as i32) as u32;
     let mut litIdx: i32 = (idx & ((1u64) << (*d).idxBits as i32).wrapping_sub(1))
@@ -2717,21 +2724,24 @@ unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *mut u8 {
     let mut ptr: *mut u32 =
         ((*d).data).offset(((block as u64) << (*d).blockSize as i32) as isize) as *mut u32;
     let mut m: i32 = (*d).minLen as i32;
-    let mut offset: *mut u16 = (*d).offset;
-    let mut base: *mut u64 = ((*d).base).as_mut_ptr().offset(-(m as isize));
+    let mut offset: *const u16 = (*d).offset;
+    let base: *const u64 = (&raw const (*d).base).cast::<u64>();
     let mut symLen: *mut u8 = (*d).symLen;
     let mut sym: u32 = 0;
     let mut bitCnt: u32 = 0;
     let mut code: u64 = u64::from_be(*(ptr as *mut u64));
     ptr = ptr.offset(2);
     bitCnt = 0;
+    // Index relative to the actual table starts. Forming pointers before the
+    // starts, then adding minLen back, is invalid pointer arithmetic.
     loop {
         let mut l: i32 = m;
-        while code < *base.offset(l as isize) {
+        while code < *base.offset((l - m) as isize) {
             l += 1;
         }
-        sym = u16::from_le(*offset.offset(l as isize)) as u32;
-        sym = sym.wrapping_add((code.wrapping_sub(*base.offset(l as isize)) >> (64 - l)) as u32);
+        sym = u16::from_le(*offset.offset((l - m) as isize)) as u32;
+        sym = sym
+            .wrapping_add((code.wrapping_sub(*base.offset((l - m) as isize)) >> (64 - l)) as u32);
         if litIdx < *symLen.offset(sym as isize) as i32 + 1 {
             break;
         }
@@ -2746,9 +2756,9 @@ unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *mut u8 {
             code |= (tmp as u64) << bitCnt;
         }
     }
-    let mut symPat: *mut u8 = (*d).symPat;
+    let mut symPat: *const u8 = (*d).symPat;
     while *symLen.offset(sym as isize) as i32 != 0 {
-        let mut w: *mut u8 = symPat.offset((3 * sym) as isize);
+        let mut w: *const u8 = symPat.offset((3 * sym) as isize);
         let mut s1: i32 = (*w.offset(1) as i32 & 0xf) << 8 | *w.offset(0) as i32;
         if litIdx < *symLen.offset(s1 as isize) as i32 + 1 {
             sym = s1 as u32;
@@ -2757,12 +2767,12 @@ unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *mut u8 {
             sym = ((*w.offset(2) as i32) << 4 | *w.offset(1) as i32 >> 4) as u32;
         }
     }
-    &mut *symPat.offset((3 * sym) as isize) as *mut u8
+    symPat.offset((3 * sym) as isize)
 }
 #[inline]
 unsafe fn fill_squares(
     mut pos: *const PyrrhicPosition,
-    mut pc: *mut u8,
+    mut pc: *const u8,
     mut flip: bool,
     mut mirror: i32,
     mut p: *mut i32,
@@ -2867,19 +2877,19 @@ pub(crate) unsafe fn probe_table(
             }
         }
         ei = if type_0 != DTZ as i32 {
-            &mut *ei.offset(bside as isize) as *mut EncInfo
+            ei.offset(bside as isize)
         } else {
             ei
         };
         let mut i: i32 = 0;
         while i < (*be).num as i32 {
-            i = fill_squares(pos, ((*ei).pieces).as_mut_ptr(), flip, 0, p.as_mut_ptr(), i);
+            i = fill_squares(pos, ((*ei).pieces).as_ptr(), flip, 0, p.as_mut_ptr(), i);
         }
         idx = encode_piece(p.as_mut_ptr(), ei, be);
     } else {
         let mut i_0: i32 = fill_squares(
             pos,
-            ((*ei).pieces).as_mut_ptr(),
+            ((*ei).pieces).as_ptr(),
             flip,
             if flip as i32 != 0 { 0x38 } else { 0 },
             p.as_mut_ptr(),
@@ -2902,16 +2912,16 @@ pub(crate) unsafe fn probe_table(
             }
         }
         ei = if type_0 == WDL as i32 {
-            &mut *ei.offset((t + 4 * bside as i32) as isize) as *mut EncInfo
+            ei.offset((t + 4 * bside as i32) as isize)
         } else if type_0 == DTM as i32 {
-            &mut *ei.offset((t + 6 * bside as i32) as isize) as *mut EncInfo
+            ei.offset((t + 6 * bside as i32) as isize)
         } else {
-            &mut *ei.offset(t as isize) as *mut EncInfo
+            ei.offset(t as isize)
         };
         while i_0 < (*be).num as i32 {
             i_0 = fill_squares(
                 pos,
-                ((*ei).pieces).as_mut_ptr(),
+                ((*ei).pieces).as_ptr(),
                 flip,
                 if flip as i32 != 0 { 0x38 } else { 0 },
                 p.as_mut_ptr(),
@@ -2924,7 +2934,7 @@ pub(crate) unsafe fn probe_table(
             encode_pawn_r(p.as_mut_ptr(), ei, be)
         };
     }
-    let mut w: *mut u8 = decompress_pairs((*ei).precomp, idx);
+    let mut w: *const u8 = decompress_pairs((*ei).precomp, idx);
     if type_0 == WDL as i32 {
         return *w.offset(0) as i32 - 2;
     }

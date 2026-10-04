@@ -485,3 +485,43 @@ fn ci_compact_tables_probe_independent_generations() {
         Ok(13)
     );
 }
+
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_allow_concurrent_wdl_and_dtz_probes() {
+    let path = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let tables = TableBases::<CozyChessAdapter>::new(path).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    let ready = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        for worker in 0..3 {
+            let tables = &tables;
+            let board = &board;
+            let ready = &ready;
+            scope.spawn(move || {
+                ready.wait();
+                for _ in 0..500 {
+                    if worker == 0 {
+                        assert_eq!(
+                            tables.probe_dtz(
+                                board.colors(cozy_chess::Color::White).0,
+                                board.colors(cozy_chess::Color::Black).0,
+                                board.pieces(Piece::King).0,
+                                board.pieces(Piece::Queen).0,
+                                board.pieces(Piece::Rook).0,
+                                board.pieces(Piece::Bishop).0,
+                                board.pieces(Piece::Knight).0,
+                                board.pieces(Piece::Pawn).0,
+                                0,
+                                true,
+                            ),
+                            Ok(13)
+                        );
+                    } else {
+                        assert_eq!(probe_wdl_for_board(tables, board), Ok(WdlProbeResult::Win));
+                    }
+                }
+            });
+        }
+    });
+}

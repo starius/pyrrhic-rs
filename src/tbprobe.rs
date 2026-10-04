@@ -60,6 +60,25 @@ pub(crate) struct BaseEntry {
     pub(crate) c2rust_unnamed: C2RustUnnamed_0,
     pub(crate) dtmLossOnly: bool,
 }
+
+impl BaseEntry {
+    fn initialized() -> Self {
+        Self {
+            key: 0,
+            data: [std::ptr::null_mut(); 3],
+            mapping: [0; 3],
+            ready: std::array::from_fn(|_| AtomicBool::new(false)),
+            failed: std::array::from_fn(|_| AtomicBool::new(false)),
+            num: 0,
+            symmetric: false,
+            hasPawns: false,
+            hasDtm: false,
+            hasDtz: false,
+            c2rust_unnamed: C2RustUnnamed_0 { kk_enc: false },
+            dtmLossOnly: false,
+        }
+    }
+}
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) union C2RustUnnamed_0 {
@@ -77,6 +96,20 @@ pub(crate) struct PieceEntry {
     pub(crate) dtzMapIdx: [u16; 4],
     pub(crate) dtzFlags: u8,
 }
+
+impl PieceEntry {
+    fn initialized() -> Self {
+        Self {
+            be: BaseEntry::initialized(),
+            ei: [EncInfo::initialized(); 5],
+            dtmMap: std::ptr::null_mut(),
+            dtmMapIdx: [[0; 2]; 2],
+            dtzMap: std::ptr::null_mut(),
+            dtzMapIdx: [0; 4],
+            dtzFlags: 0,
+        }
+    }
+}
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct EncInfo {
@@ -84,6 +117,17 @@ pub(crate) struct EncInfo {
     pub(crate) factor: [u64; 7],
     pub(crate) pieces: [u8; 7],
     pub(crate) norm: [u8; 7],
+}
+
+impl EncInfo {
+    fn initialized() -> Self {
+        Self {
+            precomp: std::ptr::null_mut(),
+            factor: [0; 7],
+            pieces: [0; 7],
+            norm: [0; 7],
+        }
+    }
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -101,6 +145,24 @@ pub(crate) struct PairsData {
     pub(crate) base: [u64; 1],
 }
 
+impl PairsData {
+    fn initialized() -> Self {
+        Self {
+            indexTable: std::ptr::null_mut(),
+            sizeTable: std::ptr::null_mut(),
+            data: std::ptr::null_mut(),
+            offset: std::ptr::null_mut(),
+            symLen: std::ptr::null_mut(),
+            symPat: std::ptr::null_mut(),
+            blockSize: 0,
+            idxBits: 0,
+            minLen: 0,
+            constValue: [0; 2],
+            base: [0; 1],
+        }
+    }
+}
+
 #[repr(C)]
 pub(crate) struct PawnEntry {
     pub(crate) be: BaseEntry,
@@ -111,6 +173,21 @@ pub(crate) struct PawnEntry {
     pub(crate) dtzMapIdx: [[u16; 4]; 4],
     pub(crate) dtzFlags: [u8; 4],
     pub(crate) dtmSwitched: bool,
+}
+
+impl PawnEntry {
+    fn initialized() -> Self {
+        Self {
+            be: BaseEntry::initialized(),
+            ei: [EncInfo::initialized(); 24],
+            dtmMap: std::ptr::null_mut(),
+            dtmMapIdx: [[[0; 2]; 2]; 6],
+            dtzMap: std::ptr::null_mut(),
+            dtzMapIdx: [[0; 4]; 4],
+            dtzFlags: [0; 4],
+            dtmSwitched: false,
+        }
+    }
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -1519,6 +1596,14 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     if (*state).piece_entry.is_null() || (*state).pawn_entry.is_null() {
         return false;
     }
+    // Construct every element before init_tb forms references into these
+    // allocations. Unused EncInfo tails must be initialized as well.
+    for i in 0..650 {
+        std::ptr::write((*state).piece_entry.add(i), PieceEntry::initialized());
+    }
+    for i in 0..861 {
+        std::ptr::write((*state).pawn_entry.add(i), PawnEntry::initialized());
+    }
     let mut i_4: i32 = 0;
     let mut j_0: i32 = 0;
     let mut k: i32 = 0;
@@ -2417,6 +2502,8 @@ unsafe fn setup_pairs(
     *flags = *data.offset(0);
     if *data.offset(0) as i32 & 0x80 != 0 {
         d = malloc(::core::mem::size_of::<PairsData>()) as *mut PairsData;
+        assert!(!d.is_null(), "Syzygy metadata allocation failed");
+        std::ptr::write(d, PairsData::initialized());
         (*d).idxBits = 0;
         (*d).constValue[0] = (if type_0 == WDL as i32 {
             *data.offset(1) as i32
@@ -2446,6 +2533,8 @@ unsafe fn setup_pairs(
             .wrapping_add((h as usize).wrapping_mul(::core::mem::size_of::<u64>()))
             .wrapping_add(numSyms as usize),
     ) as *mut PairsData;
+    assert!(!d.is_null(), "Syzygy metadata allocation failed");
+    std::ptr::write(d, PairsData::initialized());
     (*d).blockSize = blockSize;
     (*d).idxBits = idxBits;
     (*d).offset = data.offset(10) as *mut u16;
@@ -3492,5 +3581,71 @@ unsafe fn probe_root<E: EngineAdapter>(
             i_2 = i_2.wrapping_add(1);
         }
         return 0;
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    #[test]
+    fn allocation_is_initialized_before_entries_are_referenced() {
+        let dir = std::env::temp_dir().join(format!(
+            "pyrrhic-initialized-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        for name in ["KQvK.rtbw", "KPvK.rtbw"] {
+            File::create(dir.join(name)).unwrap().set_len(80).unwrap();
+        }
+
+        {
+            let owner = StateOwner::new();
+            let _scope = owner.enter();
+            assert!(unsafe { tb_init(dir.to_str().unwrap()) });
+            let state = unsafe { &*active_state() };
+            assert!(state.num_piece > 0);
+            assert!(state.num_pawn > 0);
+            for entry in unsafe { std::slice::from_raw_parts(state.piece_entry, 650) } {
+                assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
+                assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
+                assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
+                assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
+                assert!(entry.be.data.iter().all(|data| data.is_null()));
+            }
+            for entry in unsafe { std::slice::from_raw_parts(state.pawn_entry, 861) } {
+                assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
+                assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
+                assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
+                assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
+                assert!(entry.be.data.iter().all(|data| data.is_null()));
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn constant_pair_header_is_initialized_before_later_field_borrows() {
+        let mut bytes = [0x80u8, 4];
+        let mut cursor = bytes.as_mut_ptr();
+        let mut sizes = [0u64; 3];
+        let mut flags = 0;
+        let pairs =
+            unsafe { setup_pairs(&mut cursor, 1, sizes.as_mut_ptr(), &mut flags, WDL as i32) };
+        assert!(!pairs.is_null());
+        let pairs_ref = unsafe { &*pairs };
+        assert_eq!(pairs_ref.constValue, [4, 0]);
+        assert!(pairs_ref.indexTable.is_null());
+        assert!(pairs_ref.sizeTable.is_null());
+        assert!(pairs_ref.data.is_null());
+        assert!(pairs_ref.offset.is_null());
+        assert!(pairs_ref.symLen.is_null());
+        assert!(pairs_ref.symPat.is_null());
+        assert_eq!(pairs_ref.base, [0]);
+        unsafe { free(pairs.cast()) };
     }
 }

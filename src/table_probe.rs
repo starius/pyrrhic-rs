@@ -270,13 +270,19 @@ fn dtz_to_wdl(clock: u8, dtz: i32) -> u32 {
     (score + 2) as u32
 }
 
-fn pack_move(pos: &ValidatedPosition, candidate: PyrrhicMove, dtz: i32) -> u32 {
-    dtz_to_wdl(pos.rule50, dtz)
+fn pack_move(pos: &ValidatedPosition, candidate: PyrrhicMove, dtz: i32) -> Result<u32, ProbeError> {
+    // The public root format reserves twelve bits for DTZ. Reject values
+    // outside it before narrowing either the packed value or root ranking.
+    let distance = dtz.unsigned_abs();
+    if distance > 0xfff {
+        return Err(ProbeError);
+    }
+    Ok(dtz_to_wdl(pos.rule50, dtz)
         | (pyrrhic_move_from(candidate) << 10)
         | (pyrrhic_move_to(candidate) << 4)
         | (pyrrhic_move_promotes(candidate) << 16)
         | (u32::from(is_en_passant(pos, candidate)) << 19)
-        | (dtz.unsigned_abs() << 20)
+        | (distance << 20))
 }
 
 pub(crate) fn probe_root_public<E: EngineAdapter>(
@@ -309,8 +315,8 @@ pub(crate) fn probe_root_public<E: EngineAdapter>(
         if value == 0 {
             draw_count += 1;
         }
+        packed[packed_len] = pack_move(pos, candidate, value)?;
         scores[index] = value as i16;
-        packed[packed_len] = pack_move(pos, candidate, value);
         packed_len += 1;
     }
     let selected = if dtz != 0 {
@@ -342,7 +348,7 @@ pub(crate) fn probe_root_public<E: EngineAdapter>(
         None
     };
     let code = match selected {
-        Some(candidate) => pack_move(pos, candidate, dtz),
+        Some(candidate) => pack_move(pos, candidate, dtz)?,
         None if dtz < 0 => 4,
         None if dtz == 0 => 2,
         None => return Err(ProbeError),
@@ -352,4 +358,38 @@ pub(crate) fn probe_root_public<E: EngineAdapter>(
         moves: packed,
         len: packed_len,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pack_move, ProbeError};
+    use crate::{
+        table_position::ValidatedPosition,
+        tbprobe::{pyrrhic_make_move, PyrrhicPosition},
+    };
+
+    #[test]
+    fn root_distance_encoding_rejects_values_that_would_wrap() {
+        // This private packed representation cannot be asserted through a
+        // public position or TSV root-choice fixture.
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
+            white: 1 << 4,
+            black: 1 << 60,
+            kings: (1 << 4) | (1 << 60),
+            queens: 0,
+            rooks: 0,
+            bishops: 0,
+            knights: 0,
+            pawns: 0,
+            rule50: 0,
+            ep: 0,
+            turn: true,
+        });
+        let candidate = pyrrhic_make_move(0, 4, 12);
+        assert_eq!(pack_move(&position, candidate, 4095).unwrap() >> 20, 4095);
+        assert_eq!(pack_move(&position, candidate, -4095).unwrap() >> 20, 4095);
+        assert_eq!(pack_move(&position, candidate, 4096), Err(ProbeError));
+        assert_eq!(pack_move(&position, candidate, -4096), Err(ProbeError));
+        assert_eq!(pack_move(&position, candidate, i32::MIN), Err(ProbeError));
+    }
 }

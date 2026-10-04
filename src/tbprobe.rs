@@ -4,16 +4,14 @@ use std::{
     fs::{File, OpenOptions},
     os::raw::c_char,
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex,
-    },
+    sync::OnceLock,
 };
 
 #[derive(Copy, Clone, Eq, PartialEq)]
+#[repr(i32)]
 enum TableType {
-    Wdl,
-    Dtz,
+    Wdl = 0,
+    Dtz = 1,
 }
 const TB_MIN_FILE_SIZE: u64 = 80;
 extern "C" {
@@ -51,8 +49,7 @@ pub(crate) struct BaseEntry {
     pub(crate) key: u64,
     pub(crate) data: [*mut Mmap; 2],
     pub(crate) mapping: [u64; 2],
-    pub(crate) ready: [AtomicBool; 2],
-    pub(crate) failed: [AtomicBool; 2],
+    loaded: [OnceLock<Result<LoadedTable, LoadError>>; 2],
     pub(crate) num: u8,
     pub(crate) symmetric: bool,
     pub(crate) hasPawns: bool,
@@ -66,8 +63,7 @@ impl BaseEntry {
             key: 0,
             data: [std::ptr::null_mut(); 2],
             mapping: [0; 2],
-            ready: std::array::from_fn(|_| AtomicBool::new(false)),
-            failed: std::array::from_fn(|_| AtomicBool::new(false)),
+            loaded: std::array::from_fn(|_| OnceLock::new()),
             num: 0,
             symmetric: false,
             hasPawns: false,
@@ -176,6 +172,73 @@ impl PawnEntry {
         }
     }
 }
+
+#[derive(Copy, Clone)]
+enum LoadError {
+    MissingOrInvalid,
+}
+
+enum LoadedStorage {
+    Piece(Box<PieceEntry>),
+    Pawn(Box<PawnEntry>),
+}
+
+struct LoadedTable {
+    storage: LoadedStorage,
+    kind: TableType,
+}
+
+impl LoadedTable {
+    fn new(original: *const BaseEntry, kind: TableType) -> Self {
+        let storage = if unsafe { (*original).hasPawns } {
+            LoadedStorage::Pawn(Box::new(PawnEntry::initialized()))
+        } else {
+            LoadedStorage::Piece(Box::new(PieceEntry::initialized()))
+        };
+        let mut table = Self { storage, kind };
+        let destination = table.entry_ptr_mut();
+        unsafe {
+            (*destination).key = (*original).key;
+            (*destination).num = (*original).num;
+            (*destination).symmetric = (*original).symmetric;
+            (*destination).hasPawns = (*original).hasPawns;
+            (*destination).hasDtz = (*original).hasDtz;
+            if (*original).hasPawns {
+                (*destination).c2rust_unnamed.pawns = (*original).c2rust_unnamed.pawns;
+            } else {
+                (*destination).c2rust_unnamed.kk_enc = (*original).c2rust_unnamed.kk_enc;
+            }
+        }
+        table
+    }
+
+    fn entry_ptr(&self) -> *mut BaseEntry {
+        match &self.storage {
+            LoadedStorage::Piece(entry) => (&raw const entry.be).cast_mut(),
+            LoadedStorage::Pawn(entry) => (&raw const entry.be).cast_mut(),
+        }
+    }
+
+    fn entry_ptr_mut(&mut self) -> *mut BaseEntry {
+        match &mut self.storage {
+            LoadedStorage::Piece(entry) => &raw mut entry.be,
+            LoadedStorage::Pawn(entry) => &raw mut entry.be,
+        }
+    }
+}
+
+// Each table is fully constructed before OnceLock publishes it. Its raw
+// pointers target only the immutable mapping and metadata owned here. This
+// temporary bridge is removed when the checked parser owns its metadata.
+unsafe impl Send for LoadedTable {}
+unsafe impl Sync for LoadedTable {}
+
+impl Drop for LoadedTable {
+    fn drop(&mut self) {
+        unsafe { free_table_type(self.entry_ptr(), self.kind as i32) };
+    }
+}
+
 #[derive(Copy, Clone)]
 enum EntryIndex {
     Piece(usize),
@@ -277,7 +340,6 @@ unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
     let le_u16 = (p as *mut u16).read_unaligned();
     u16::from_le(le_u16)
 }
-static TB_MUTEX: Mutex<()> = Mutex::new(());
 // Windows drive letters contain ':', so its tablebase path list uses ';'.
 const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -349,17 +411,10 @@ impl Generation {
 }
 
 // Discovery finishes before a Generation is shared. The hash, paths, and
-// counts are then read-only. Lazy mapping writes stable entries under TB_MUTEX
-// and publishes decoded data through their ready atomics. Arc destruction
-// occurs after every active probe and clone has released the owner.
+// counts are then read-only. Lazy mappings are published through entry cells.
+// Arc destruction occurs after every active probe and clone has released it.
 unsafe impl Send for Generation {}
 unsafe impl Sync for Generation {}
-
-impl Drop for Generation {
-    fn drop(&mut self) {
-        unsafe { tb_free(self) };
-    }
-}
 
 unsafe fn open_tb(
     owner: &Generation,
@@ -1443,10 +1498,6 @@ unsafe fn init_tb(owner: &Generation, mut str: *const c_char) {
     if (*be).num as i32 > (*owner.state_ptr()).max_cardinality {
         (*owner.state_ptr()).max_cardinality = (*be).num as i32;
     }
-    for table_type in 0..2 {
-        (*be).ready[table_type] = AtomicBool::new(false);
-        (*be).failed[table_type] = AtomicBool::new(false);
-    }
     if !(*be).hasPawns {
         let mut j: i32 = 0;
         let mut i_1: i32 = 0;
@@ -1496,25 +1547,20 @@ pub(crate) unsafe fn first_ei(be: *mut BaseEntry, type_0: i32) -> *mut EncInfo {
             .offset((if type_0 == WDL as i32 { 0 } else { 2 }) as isize)
     }
 }
-unsafe fn free_tb_entry(be: *mut BaseEntry) {
-    let mut type_0: i32 = 0;
-    while type_0 < 2 {
-        if (*be).ready[type_0 as usize].load(Ordering::Relaxed) {
-            unmap_file((*be).data[type_0 as usize], (*be).mapping[type_0 as usize]);
-            let mut num: i32 = num_tables(be);
-            let mut ei: *mut EncInfo = first_ei(be, type_0);
-            let mut t: i32 = 0;
-            while t < num {
-                free((*ei.offset(t as isize)).precomp as *mut libc::c_void);
-                if type_0 != DTZ as i32 {
-                    free((*ei.offset((num + t) as isize)).precomp as *mut libc::c_void);
-                }
-                t += 1;
-            }
-            (*be).ready[type_0 as usize].store(false, Ordering::Relaxed);
-        }
-        type_0 += 1;
+unsafe fn free_table_type(be: *mut BaseEntry, type_0: i32) {
+    if (*be).data[type_0 as usize].is_null() {
+        return;
     }
+    unmap_file((*be).data[type_0 as usize], (*be).mapping[type_0 as usize]);
+    let num = num_tables(be);
+    let ei = first_ei(be, type_0);
+    for t in 0..num {
+        free((*ei.offset(t as isize)).precomp as *mut libc::c_void);
+        if type_0 != DTZ as i32 {
+            free((*ei.offset((num + t) as isize)).precomp as *mut libc::c_void);
+        }
+    }
+    (*be).data[type_0 as usize] = std::ptr::null_mut();
 }
 
 pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
@@ -1824,15 +1870,6 @@ pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
     1 != 0
 }
 
-pub(crate) unsafe fn tb_free(owner: &Generation) {
-    let state = owner.state_ptr();
-    for i in 0..(*state).num_piece {
-        free_tb_entry(&mut (*state).piece_entry[i as usize].be);
-    }
-    for i in 0..(*state).num_pawn {
-        free_tb_entry(&mut (*state).pawn_entry[i as usize].be);
-    }
-}
 #[rustfmt::skip]
 const OFF_DIAG: [i8; 64] = [
     0, -1, -1, -1, -1, -1, -1, -1,
@@ -2769,6 +2806,25 @@ unsafe fn fill_squares(
     i
 }
 
+fn load_table(
+    owner: &Generation,
+    pos: *const PyrrhicPosition,
+    original: *const BaseEntry,
+    key: u64,
+    kind: TableType,
+) -> Result<LoadedTable, LoadError> {
+    let mut table = LoadedTable::new(original, kind);
+    let mut name = [0 as c_char; 16];
+    unsafe {
+        prt_str(pos, name.as_mut_ptr(), ((*original).key != key) as i32);
+        if init_table(owner, table.entry_ptr_mut(), name.as_ptr(), kind as i32) {
+            Ok(table)
+        } else {
+            Err(LoadError::MissingOrInvalid)
+        }
+    }
+}
+
 pub(crate) unsafe fn probe_table(
     owner: &Generation,
     mut pos: *const PyrrhicPosition,
@@ -2789,40 +2845,29 @@ pub(crate) unsafe fn probe_table(
         *success = 0;
         return 0;
     };
-    let be: *mut BaseEntry = match entry {
+    let original: *mut BaseEntry = match entry {
         EntryIndex::Piece(index) => &raw mut (*state).piece_entry[index].be,
         EntryIndex::Pawn(index) => &raw mut (*state).pawn_entry[index].be,
     };
-    if type_0 == DTZ as i32 && !(*be).hasDtz {
+    if type_0 == DTZ as i32 && !(*original).hasDtz {
         *success = 0;
         return 0;
     }
-    if (*be).failed[type_0 as usize].load(Ordering::Acquire) {
-        *success = 0;
-        return 0;
-    }
-    if !(*be).ready[type_0 as usize].load(Ordering::Acquire) {
-        // will be unlocked at the end of scope
-        let lock = TB_MUTEX.lock().unwrap();
-        if !(*be).ready[type_0 as usize].load(Ordering::Relaxed)
-            && !(*be).failed[type_0 as usize].load(Ordering::Relaxed)
-        {
-            let mut str: [c_char; 16] = [0; 16];
-            prt_str(pos, str.as_mut_ptr(), ((*be).key != key) as i32);
-            if !init_table(owner, be, str.as_mut_ptr(), type_0) {
-                (*be).failed[type_0 as usize].store(true, Ordering::Release);
-                *success = 0;
-                drop(lock);
-                return 0;
-            }
-            (*be).ready[type_0 as usize].store(true, Ordering::Release);
+    let kind = if type_0 == WDL as i32 {
+        TableType::Wdl
+    } else {
+        TableType::Dtz
+    };
+    let table = match (*original).loaded[type_0 as usize]
+        .get_or_init(|| load_table(owner, pos, original, key, kind))
+    {
+        Ok(table) => table,
+        Err(_) => {
+            *success = 0;
+            return 0;
         }
-        drop(lock);
-    }
-    if (*be).failed[type_0 as usize].load(Ordering::Acquire) {
-        *success = 0;
-        return 0;
-    }
+    };
+    let be = table.entry_ptr();
     let mut bside: bool = false;
     let mut flip: bool = false;
     if !(*be).symmetric {

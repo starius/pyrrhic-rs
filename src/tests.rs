@@ -231,26 +231,7 @@ fn test_multithread() {
     let worker = std::thread::spawn(move || {
         let board = Board::from_fen(pos, false).unwrap();
         for _ in 0..1000 {
-            std::hint::black_box({
-                let _ = second_tb.probe_wdl(
-                    board.colors(cozy_chess::Color::White).0,
-                    board.colors(cozy_chess::Color::Black).0,
-                    board.pieces(Piece::King).0,
-                    board.pieces(Piece::Queen).0,
-                    board.pieces(Piece::Rook).0,
-                    board.pieces(Piece::Bishop).0,
-                    board.pieces(Piece::Knight).0,
-                    board.pieces(Piece::Pawn).0,
-                    0,
-                    board.side_to_move() == cozy_chess::Color::White,
-                );
-            });
-        }
-    });
-    let board = Board::from_fen(pos, false).unwrap();
-    for _ in 0..10000 {
-        std::hint::black_box({
-            let _ = first_tb.probe_wdl(
+            let _ = std::hint::black_box(second_tb.probe_wdl(
                 board.colors(cozy_chess::Color::White).0,
                 board.colors(cozy_chess::Color::Black).0,
                 board.pieces(Piece::King).0,
@@ -261,8 +242,23 @@ fn test_multithread() {
                 board.pieces(Piece::Pawn).0,
                 0,
                 board.side_to_move() == cozy_chess::Color::White,
-            );
-        });
+            ));
+        }
+    });
+    let board = Board::from_fen(pos, false).unwrap();
+    for _ in 0..10000 {
+        let _ = std::hint::black_box(first_tb.probe_wdl(
+            board.colors(cozy_chess::Color::White).0,
+            board.colors(cozy_chess::Color::Black).0,
+            board.pieces(Piece::King).0,
+            board.pieces(Piece::Queen).0,
+            board.pieces(Piece::Rook).0,
+            board.pieces(Piece::Bishop).0,
+            board.pieces(Piece::Knight).0,
+            board.pieces(Piece::Pawn).0,
+            0,
+            board.side_to_move() == cozy_chess::Color::White,
+        ));
     }
     worker.join().unwrap();
 }

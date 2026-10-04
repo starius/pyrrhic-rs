@@ -113,6 +113,56 @@ fn probe(tb: &TableBases<Adapter>, pos: Position, kind: Probe) -> Result<i32, TB
     }
 }
 
+// This checks public first-load and generation behavior, not a root move that
+// the TSV fixture schema can express.
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_cache_dtz_failure_without_poisoning_wdl() {
+    let source = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let destination = std::env::temp_dir().join(format!(
+        "pyrrhic-load-isolation-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&destination).unwrap();
+    for suffix in ["rtbw", "rtbz"] {
+        let name = format!("KQvK.{suffix}");
+        std::fs::copy(
+            std::path::Path::new(&source).join(&name),
+            destination.join(name),
+        )
+        .unwrap();
+    }
+
+    let tables = TableBases::<Adapter>::new(destination.to_str().unwrap()).unwrap();
+    std::fs::remove_file(destination.join("KQvK.rtbz")).unwrap();
+    std::fs::write(destination.join("KQvK.rtbz"), [0; 80]).unwrap();
+    assert_eq!(probe(&tables, Position::WITNESS, Probe::Wdl), Ok(1));
+    assert_eq!(
+        probe(&tables, Position::WITNESS, Probe::Dtz),
+        Err(TBError::ProbeFailed)
+    );
+    assert_eq!(probe(&tables, Position::WITNESS, Probe::Wdl), Ok(1));
+
+    std::fs::copy(
+        std::path::Path::new(&source).join("KQvK.rtbz"),
+        destination.join("KQvK.rtbz"),
+    )
+    .unwrap();
+    assert_eq!(
+        probe(&tables, Position::WITNESS, Probe::Dtz),
+        Err(TBError::ProbeFailed)
+    );
+    let replacement = TableBases::<Adapter>::new(destination.to_str().unwrap()).unwrap();
+    assert_eq!(probe(&replacement, Position::WITNESS, Probe::Dtz), Ok(13));
+    drop(replacement);
+    drop(tables);
+    std::fs::remove_dir_all(destination).unwrap();
+}
+
 // This tests direct API failure and cache isolation, which cannot be expressed
 // as a TSV assertion about Ember's chosen root move.
 #[test]

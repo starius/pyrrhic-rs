@@ -7,7 +7,9 @@ use crate::{
 };
 use cozy_chess::*;
 
-const SYZYGY_PATH: &str = env!("SYZYGY_PATH");
+fn full_syzygy_path() -> String {
+    std::env::var("SYZYGY_PATH").expect("set SYZYGY_PATH for the full tablebase tests")
+}
 #[derive(Copy, Clone)]
 struct CozyChessAdapter;
 
@@ -43,13 +45,9 @@ impl EngineAdapter for CozyChessAdapter {
 }
 
 #[test]
+#[ignore = "requires SYZYGY_PATH with KPvKP and other full-set tables"]
 fn test_probe_kpvk() {
-    let tb = loop {
-        let test = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH);
-        if let Ok(tb) = test {
-            break tb;
-        }
-    };
+    let tb = TableBases::<CozyChessAdapter>::new(full_syzygy_path()).unwrap();
     let test_pos_wins = [
         ("6k1/8/8/3P4/4K3/8/8/8 w - - 0 1", 1),
         ("8/7k/1p6/1P6/7K/8/8/8 w - - 0 1", 21),
@@ -122,17 +120,21 @@ fn test_probe_kpvk() {
 }
 
 #[test]
-fn test_double_init() {
-    let first_tb = loop {
-        let test = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH);
-        if let Ok(tb) = test {
-            break tb;
-        }
-    };
-    let second_tb = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH);
-
-    assert!(matches!(second_tb, Err(TBError::AlreadyInitialized)));
-    std::hint::black_box(first_tb);
+fn independent_handles_can_load_the_same_path() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-independent-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::File::create(dir.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let first = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    let second = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    assert_eq!(first.max_pieces(), 3);
+    assert_eq!(second.max_pieces(), 3);
+    drop(first);
+    assert_eq!(second.max_pieces(), 3);
+    drop(second);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -148,7 +150,14 @@ fn bad_path_does_not_block_later_initialization() {
     };
     assert_eq!(error, TBError::BadPath);
     std::fs::remove_dir(&empty).unwrap();
-    assert!(TableBases::<CozyChessAdapter>::new(SYZYGY_PATH).is_ok());
+    let valid = std::env::temp_dir().join(format!("pyrrhic-valid-{}", std::process::id()));
+    std::fs::create_dir_all(&valid).unwrap();
+    std::fs::File::create(valid.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    assert!(TableBases::<CozyChessAdapter>::new(valid.to_str().unwrap()).is_ok());
+    std::fs::remove_dir_all(valid).unwrap();
 }
 
 #[test]
@@ -159,8 +168,7 @@ fn wdl_only_directory_does_not_claim_dtz_coverage() {
     file.set_len(80).unwrap();
     let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
     assert_eq!(tb.max_pieces(), 3);
-    assert_eq!(unsafe { crate::tbprobe::TB_NUM_WDL }, 1);
-    assert_eq!(unsafe { crate::tbprobe::TB_NUM_DTZ }, 0);
+    assert_eq!(tb.counts(), (1, 0));
     drop(tb);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -172,15 +180,9 @@ fn three_versus_two_material_is_discovered() {
     let file = std::fs::File::create(dir.join("KRPvKR.rtbw")).unwrap();
     file.set_len(80).unwrap();
 
-    let tb = loop {
-        match TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()) {
-            Ok(tb) => break tb,
-            Err(TBError::AlreadyInitialized) => std::thread::yield_now(),
-            Err(error) => panic!("five-piece table was not discovered: {error:?}"),
-        }
-    };
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
     assert_eq!(tb.max_pieces(), 5);
-    assert_eq!(unsafe { crate::tbprobe::TB_NUM_WDL }, 1);
+    assert_eq!(tb.counts(), (1, 0));
     drop(tb);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -220,123 +222,10 @@ fn unix_path_list_keeps_colon_separator() {
 }
 
 #[test]
-fn path_components_are_bounded_and_embedded_nul_fails() {
-    let dir = std::env::temp_dir().join(format!("pyrrhic-path-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::File::create(dir.join("KQvK.rtbw"))
-        .unwrap()
-        .set_len(80)
-        .unwrap();
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    let path = format!("{separator}{}{separator}{separator}", dir.display());
-    let tb = TableBases::<CozyChessAdapter>::new(&path).unwrap();
-    assert_eq!(tb.max_pieces(), 3);
-    drop(tb);
-    assert!(matches!(
-        TableBases::<CozyChessAdapter>::new(format!("{}\0", dir.display())),
-        Err(TBError::InitFailed)
-    ));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn concurrent_failed_lazy_probes_do_not_mutate_material_hash() {
-    let dir = std::env::temp_dir().join(format!("pyrrhic-corrupt-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::File::create(dir.join("KQvK.rtbw"))
-        .unwrap()
-        .set_len(80)
-        .unwrap();
-    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-    let workers = (0..8)
-        .map(|_| {
-            let tb = tb.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
-                barrier.wait();
-                for _ in 0..50 {
-                    let result = tb.probe_wdl(
-                        board.colors(cozy_chess::Color::White).0,
-                        board.colors(cozy_chess::Color::Black).0,
-                        board.pieces(Piece::King).0,
-                        board.pieces(Piece::Queen).0,
-                        board.pieces(Piece::Rook).0,
-                        board.pieces(Piece::Bishop).0,
-                        board.pieces(Piece::Knight).0,
-                        board.pieces(Piece::Pawn).0,
-                        0,
-                        true,
-                    );
-                    assert_eq!(result, Err(TBError::ProbeFailed));
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    for worker in workers {
-        worker.join().unwrap();
-    }
-    assert_eq!(tb.max_pieces(), 3);
-    drop(tb);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-fn probe_wdl_for_board(
-    tb: &TableBases<CozyChessAdapter>,
-    board: &Board,
-) -> Result<WdlProbeResult, TBError> {
-    tb.probe_wdl(
-        board.colors(cozy_chess::Color::White).0,
-        board.colors(cozy_chess::Color::Black).0,
-        board.pieces(Piece::King).0,
-        board.pieces(Piece::Queen).0,
-        board.pieces(Piece::Rook).0,
-        board.pieces(Piece::Bishop).0,
-        board.pieces(Piece::Knight).0,
-        board.pieces(Piece::Pawn).0,
-        0,
-        board.side_to_move() == cozy_chess::Color::White,
-    )
-}
-
-#[test]
-fn short_header_after_discovery_returns_probe_failure() {
-    let dir = std::env::temp_dir().join(format!("pyrrhic-short-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
-    file.set_len(80).unwrap();
-    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
-    file.set_len(4).unwrap();
-    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
-    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
-    drop(tb);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn missing_file_after_discovery_returns_probe_failure() {
-    let dir = std::env::temp_dir().join(format!("pyrrhic-missing-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("KQvK.rtbw");
-    std::fs::File::create(&file).unwrap().set_len(80).unwrap();
-    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
-    std::fs::remove_file(file).unwrap();
-    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
-    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
-    drop(tb);
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
+#[ignore = "requires SYZYGY_PATH with KPvKP"]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";
-    let first_tb = loop {
-        let test = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH);
-        if let Ok(tb) = test {
-            break tb;
-        }
-    };
+    let first_tb = TableBases::<CozyChessAdapter>::new(full_syzygy_path()).unwrap();
     let second_tb = first_tb.clone();
 
     let worker = std::thread::spawn(move || {
@@ -379,8 +268,9 @@ fn test_multithread() {
 }
 
 #[test]
+#[ignore = "requires SYZYGY_PATH with KQvK"]
 fn root_probe_works_with_cloned_worker_handle() {
-    let tb = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(full_syzygy_path()).unwrap();
     let worker = tb.clone();
     let board = Board::from_str("8/7k/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
     let result = tb.probe_root(
@@ -398,4 +288,200 @@ fn root_probe_works_with_cloned_worker_handle() {
     );
     assert!(matches!(result.unwrap().root, DtzProbeValue::DtzResult(_)));
     std::hint::black_box(worker);
+}
+
+#[test]
+fn replacement_preserves_existing_generation() {
+    let base = std::env::temp_dir().join(format!("pyrrhic-reload-{}", std::process::id()));
+    let small = base.join("small");
+    let large = base.join("large");
+    let empty = base.join("empty");
+    std::fs::create_dir_all(&small).unwrap();
+    std::fs::create_dir_all(&large).unwrap();
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::File::create(small.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    std::fs::File::create(large.join("KRPvKR.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(small.to_str().unwrap()).unwrap();
+    let worker = tb.clone();
+    let replacement = TableBases::<CozyChessAdapter>::new(large.to_str().unwrap()).unwrap();
+    assert_eq!(worker.max_pieces(), 3);
+    assert_eq!(replacement.max_pieces(), 5);
+    assert!(matches!(
+        TableBases::<CozyChessAdapter>::new(empty.to_str().unwrap()),
+        Err(TBError::BadPath)
+    ));
+    assert_eq!(worker.max_pieces(), 3);
+    drop(tb);
+    assert_eq!(worker.max_pieces(), 3);
+    drop(worker);
+    drop(replacement);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn concurrent_clone_drops_release_generation() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::File::create(dir.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let workers: Vec<_> = (0..16)
+        .map(|_| {
+            let clone = tb.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                drop(clone);
+            })
+        })
+        .collect();
+    drop(tb);
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert!(TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).is_ok());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn probe_wdl_for_board(
+    tb: &TableBases<CozyChessAdapter>,
+    board: &Board,
+) -> Result<WdlProbeResult, TBError> {
+    tb.probe_wdl(
+        board.colors(cozy_chess::Color::White).0,
+        board.colors(cozy_chess::Color::Black).0,
+        board.pieces(Piece::King).0,
+        board.pieces(Piece::Queen).0,
+        board.pieces(Piece::Rook).0,
+        board.pieces(Piece::Bishop).0,
+        board.pieces(Piece::Knight).0,
+        board.pieces(Piece::Pawn).0,
+        0,
+        board.side_to_move() == cozy_chess::Color::White,
+    )
+}
+
+#[test]
+fn path_components_are_bounded_and_embedded_nul_fails() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-path-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::File::create(dir.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let path = format!("{separator}{}{separator}{separator}", dir.display());
+    let tb = TableBases::<CozyChessAdapter>::new(&path).unwrap();
+    assert_eq!(tb.max_pieces(), 3);
+    assert!(matches!(
+        TableBases::<CozyChessAdapter>::new(format!("{}\0", dir.display())),
+        Err(TBError::InitFailed)
+    ));
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn concurrent_failed_lazy_probes_leave_hash_and_other_generations_intact() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-corrupt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    let parallel = (0..8)
+        .map(|_| {
+            let tb = tb.clone();
+            std::thread::spawn(move || {
+                let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+                for _ in 0..50 {
+                    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in parallel {
+        thread.join().unwrap();
+    }
+    assert_eq!(tb.max_pieces(), 3);
+    let another = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    assert_eq!(another.max_pieces(), 3);
+    drop(another);
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn short_header_after_discovery_returns_probe_failure() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-short-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    file.set_len(4).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn missing_file_after_discovery_returns_probe_failure() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-missing-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("KQvK.rtbw");
+    std::fs::File::create(&file).unwrap().set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    std::fs::remove_file(file).unwrap();
+    let board = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    assert_eq!(probe_wdl_for_board(&tb, &board), Err(TBError::ProbeFailed));
+    drop(tb);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "run with SYZYGY_CI_PATH pointing to the compact Nix tablebase set"]
+fn ci_compact_tables_probe_independent_generations() {
+    let path = std::env::var("SYZYGY_CI_PATH").expect("SYZYGY_CI_PATH is required");
+    let first = TableBases::<CozyChessAdapter>::new(&path).unwrap();
+    let second = TableBases::<CozyChessAdapter>::new(&path).unwrap();
+    assert_eq!(first.max_pieces(), 5);
+    assert_eq!(first.counts(), (5, 5));
+    let queen = Board::from_str("7k/8/8/8/8/8/8/1Q2K3 w - - 0 1").unwrap();
+    let split = Board::from_str("6rk/8/8/8/8/8/8/KNN5 w - - 0 1").unwrap();
+    assert_eq!(probe_wdl_for_board(&first, &queen), Ok(WdlProbeResult::Win));
+    assert_eq!(
+        probe_wdl_for_board(&second, &split),
+        Ok(WdlProbeResult::Draw)
+    );
+    drop(first);
+    assert_eq!(
+        probe_wdl_for_board(&second, &queen),
+        Ok(WdlProbeResult::Win)
+    );
+    assert_eq!(
+        second.probe_dtz(
+            queen.colors(cozy_chess::Color::White).0,
+            queen.colors(cozy_chess::Color::Black).0,
+            queen.pieces(Piece::King).0,
+            queen.pieces(Piece::Queen).0,
+            queen.pieces(Piece::Rook).0,
+            queen.pieces(Piece::Bishop).0,
+            queen.pieces(Piece::Knight).0,
+            queen.pieces(Piece::Pawn).0,
+            0,
+            true,
+        ),
+        Ok(13)
+    );
 }

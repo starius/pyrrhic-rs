@@ -1,14 +1,11 @@
 use std::{
     marker::PhantomData,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 use crate::{
     engine_adapter::{EngineAdapter, Piece},
-    tbprobe::{self, tb_free, tb_init, tb_probe_root, tb_probe_wdl, TB_LARGEST},
+    tbprobe::{self, tb_init, tb_probe_root, tb_probe_wdl, StateOwner},
 };
 
 /// Tablebase error type
@@ -18,10 +15,6 @@ pub enum TBError {
     BadPath,
     /// Tablebase initialization failed
     InitFailed,
-    /// The tablebases are already initialized
-    AlreadyInitialized,
-    /// Another `[TableBases]` instance exists
-    NotSingleton,
     /// Probing the tablebases failed
     ProbeFailed,
 }
@@ -91,13 +84,10 @@ pub struct DtzProbeResult {
 /// safely sent across threads and manages initialization and de-initialization of the tablebases.
 #[derive(Clone)]
 pub struct TableBases<E: EngineAdapter> {
-    handle: Arc<()>,
+    handle: Arc<StateOwner>,
     _engine: PhantomData<E>,
 }
 
-// guard against multiple initialization and freeing
-#[doc(hidden)]
-static TB_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static ROOT_PROBE_MUTEX: Mutex<()> = Mutex::new(());
 
 impl<E: EngineAdapter> TableBases<E> {
@@ -107,34 +97,21 @@ impl<E: EngineAdapter> TableBases<E> {
     /// ## Notes:
     /// Absolute paths with Windows drive letters are accepted.
     ///
-    /// ## Errors:
-    /// This function will return `[TBError::AlreadyInitialized]` if another `TableBases` instance has already been created. To get multiple
-    /// handles to the tablebases for sharing across threads, use `TableBases::clone`.
     pub fn new<P: AsRef<str>>(path: P) -> Result<Self, TBError> {
-        // make sure the read and write are completed before other threads can access the global
-        if TB_INITIALIZED.swap(true, Ordering::SeqCst) {
-            return Err(TBError::AlreadyInitialized);
-        }
-
-        let init = unsafe { tb_init(path.as_ref()) };
-
-        if init {
-            if unsafe { tbprobe::TB_LARGEST == 0 } {
-                // tb_init can succeed even when the path contains no tables.
-                // A later SyzygyPath must be able to initialize again.
-                unsafe { tb_free() };
-                TB_INITIALIZED.store(false, Ordering::SeqCst);
-                Err(TBError::BadPath)
-            } else {
-                Ok(Self {
-                    handle: Arc::new(()),
-                    _engine: PhantomData,
-                })
+        let handle = Arc::new(StateOwner::new());
+        {
+            let _scope = handle.enter();
+            if !unsafe { tb_init(path.as_ref()) } {
+                return Err(TBError::InitFailed);
             }
-        } else {
-            TB_INITIALIZED.store(false, Ordering::SeqCst);
-            Err(TBError::InitFailed)
         }
+        if handle.max_pieces() == 0 {
+            return Err(TBError::BadPath);
+        }
+        Ok(Self {
+            handle,
+            _engine: PhantomData,
+        })
     }
 
     /// Probe the Win-Draw-Loss (WDL) tables.
@@ -152,6 +129,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<WdlProbeResult, TBError> {
+        let _scope = self.handle.enter();
         let result = unsafe {
             tb_probe_wdl::<E>(
                 white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
@@ -184,6 +162,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<i32, TBError> {
+        let _scope = self.handle.enter();
         unsafe {
             tbprobe::tb_probe_dtz::<E>(
                 white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
@@ -212,6 +191,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<DtzProbeResult, TBError> {
+        let _scope = self.handle.enter();
         let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
         let mut results = [0u32; 256];
         let result = unsafe {
@@ -257,17 +237,18 @@ impl<E: EngineAdapter> TableBases<E> {
 
     /// The maximum number of pieces (including kings) that the loaded tablebases can be probed with
     pub fn max_pieces(&self) -> u32 {
-        unsafe { TB_LARGEST as u32 }
+        self.handle.max_pieces()
     }
-}
 
-impl<E: EngineAdapter> Drop for TableBases<E> {
-    fn drop(&mut self) {
-        // only free the TBs if this handle is the last one
-        if Arc::strong_count(&self.handle) == 1 && TB_INITIALIZED.load(Ordering::SeqCst) {
-            unsafe { tb_free() };
-            TB_INITIALIZED.store(false, Ordering::SeqCst);
-        }
+    /// Material names found in WDL files with plausible sizes, with DTZ
+    /// availability from the same discovery pass. Headers load on first probe.
+    pub fn materials(&self) -> Vec<(String, bool)> {
+        self.handle.materials()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> (i32, i32) {
+        self.handle.counts()
     }
 }
 

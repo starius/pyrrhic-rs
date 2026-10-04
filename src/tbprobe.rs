@@ -1,10 +1,11 @@
 use std::{
+    cell::{Cell, UnsafeCell},
     ffi::{CStr, CString},
     fs::{File, OpenOptions},
     os::raw::c_char,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex,
+        Mutex, Once,
     },
 };
 
@@ -17,12 +18,9 @@ extern "C" {
     fn perror(__s: *const c_char);
     fn malloc(_: usize) -> *mut libc::c_void;
     fn free(_: *mut libc::c_void);
-    fn exit(_: i32) -> !;
     fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: usize) -> *mut libc::c_void;
     fn memset(_: *mut libc::c_void, _: i32, _: usize) -> *mut libc::c_void;
-    fn strcpy(_: *mut c_char, _: *const c_char) -> *mut c_char;
     fn strcmp(_: *const c_char, _: *const c_char) -> i32;
-    fn strlen(_: *const c_char) -> usize;
 }
 
 pub(crate) const PYRRHIC_PRIME_BPAWN: u64 = 11695583624105689831;
@@ -227,25 +225,124 @@ unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
     u16::from_le(le_u16)
 }
 static TB_MUTEX: Mutex<()> = Mutex::new(());
-static mut initialized: i32 = 0;
-static mut numPaths: i32 = 0;
+static INDICES_INIT: Once = Once::new();
 // Windows drive letters contain ':', so its tablebase path list uses ';'.
-const PATH_SEPARATOR: i32 = if cfg!(windows) {
-    ';' as i32
-} else {
-    ':' as i32
-};
-static mut pathString: *mut c_char = 0 as *const c_char as *mut c_char;
-static mut paths: *mut *mut c_char = 0 as *const *mut c_char as *mut *mut c_char;
+const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// One immutable discovery set with lazily initialized, synchronized mappings.
+/// The entry arrays are allocated once and their addresses remain stable until
+/// the final handle is dropped.
+pub(crate) struct RawState {
+    paths: Vec<CString>,
+    discovered: Vec<(String, bool)>,
+    pub(crate) max_cardinality: i32,
+    max_cardinality_dtm: i32,
+    pub(crate) largest: i32,
+    pub(crate) num_wdl: i32,
+    pub(crate) num_dtm: i32,
+    pub(crate) num_dtz: i32,
+    num_piece: i32,
+    num_pawn: i32,
+    piece_entry: *mut PieceEntry,
+    pawn_entry: *mut PawnEntry,
+    hash: [TbHashEntry; 4096],
+}
+
+impl Default for RawState {
+    fn default() -> Self {
+        Self {
+            paths: Vec::new(),
+            discovered: Vec::new(),
+            max_cardinality: 0,
+            max_cardinality_dtm: 0,
+            largest: 0,
+            num_wdl: 0,
+            num_dtm: 0,
+            num_dtz: 0,
+            num_piece: 0,
+            num_pawn: 0,
+            piece_entry: std::ptr::null_mut(),
+            pawn_entry: std::ptr::null_mut(),
+            hash: [TbHashEntry {
+                key: 0,
+                ptr: std::ptr::null_mut(),
+            }; 4096],
+        }
+    }
+}
+
+pub(crate) struct StateOwner(UnsafeCell<RawState>);
+
+impl StateOwner {
+    pub(crate) fn new() -> Self {
+        Self(UnsafeCell::new(RawState::default()))
+    }
+
+    pub(crate) fn enter(&self) -> StateScope<'_> {
+        let previous = ACTIVE_STATE.with(|active| active.replace(self.0.get()));
+        StateScope(previous, std::marker::PhantomData)
+    }
+
+    pub(crate) fn max_pieces(&self) -> u32 {
+        // Discovery is complete before the owner is shared; this field is
+        // never written after publication.
+        unsafe { (*self.0.get()).largest as u32 }
+    }
+
+    pub(crate) fn materials(&self) -> Vec<(String, bool)> {
+        // Discovery is complete before this is called. Clone only at load
+        // time; probing never needs the material-name list.
+        unsafe { (*self.0.get()).discovered.clone() }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> (i32, i32) {
+        unsafe { ((*self.0.get()).num_wdl, (*self.0.get()).num_dtz) }
+    }
+}
+
+// Discovery finishes before a StateOwner is shared. The hash, paths, and
+// counts are then read-only. Lazy mapping writes stable entries under TB_MUTEX
+// and publishes decoded data through their ready atomics. Arc destruction
+// occurs after every active probe and clone has released the owner.
+unsafe impl Send for StateOwner {}
+unsafe impl Sync for StateOwner {}
+
+impl Drop for StateOwner {
+    fn drop(&mut self) {
+        let _scope = self.enter();
+        unsafe { tb_free() };
+    }
+}
+
+thread_local! {
+    static ACTIVE_STATE: Cell<*mut RawState> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+pub(crate) struct StateScope<'a>(*mut RawState, std::marker::PhantomData<&'a StateOwner>);
+
+impl Drop for StateScope<'_> {
+    fn drop(&mut self) {
+        ACTIVE_STATE.with(|active| active.set(self.0));
+    }
+}
+
+#[inline]
+unsafe fn active_state() -> *mut RawState {
+    let state = ACTIVE_STATE.with(Cell::get);
+    debug_assert!(
+        !state.is_null(),
+        "Pyrrhic probe used without a tablebase owner"
+    );
+    state
+}
 
 unsafe fn open_tb(
     mut str: *const c_char,
     mut suffix: *const c_char,
 ) -> Result<File, std::io::Error> {
-    let mut i: i32 = 0;
-    i = 0;
-    while i < numPaths {
-        let path = CStr::from_ptr(*paths.offset(i as isize));
+    let state = active_state();
+    for path in &(*state).paths {
         let str = CStr::from_ptr(str);
         let suffix = CStr::from_ptr(suffix);
         let file = format!(
@@ -258,7 +355,6 @@ unsafe fn open_tb(
         if file_handle.is_ok() {
             return file_handle;
         }
-        i += 1;
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -287,18 +383,7 @@ unsafe fn unmap_file(data: *mut Mmap, _size: u64) {
     drop(mmap_ptr);
 }
 
-pub(crate) static mut TB_MaxCardinality: i32 = 0;
-
-pub(crate) static mut TB_MaxCardinalityDTM: i32 = 0;
-
-pub(crate) static mut TB_LARGEST: i32 = 0;
-
-pub(crate) static mut TB_NUM_WDL: i32 = 0;
-
-pub(crate) static mut TB_NUM_DTM: i32 = 0;
-
-pub(crate) static mut TB_NUM_DTZ: i32 = 0;
-static mut tbSuffix: [*const c_char; 3] = [
+const TB_SUFFIX: [*const c_char; 3] = [
     b".rtbw\0" as *const u8 as *const c_char,
     b".rtbm\0" as *const u8 as *const c_char,
     b".rtbz\0" as *const u8 as *const c_char,
@@ -975,17 +1060,6 @@ pub(crate) unsafe fn pyrrhic_legal_move<E: EngineAdapter>(
     };
     pyrrhic_do_move::<E>(&mut pos1, pos, move_0)
 }
-static mut tbNumPiece: i32 = 0;
-static mut tbNumPawn: i32 = 0;
-static mut numWdl: i32 = 0;
-static mut numDtm: i32 = 0;
-static mut numDtz: i32 = 0;
-static mut pieceEntry: *mut PieceEntry = 0 as *const PieceEntry as *mut PieceEntry;
-static mut pawnEntry: *mut PawnEntry = 0 as *const PawnEntry as *mut PawnEntry;
-static mut tbHash: [TbHashEntry; 4096] = [TbHashEntry {
-    key: 0,
-    ptr: 0 as *const BaseEntry as *mut BaseEntry,
-}; 4096];
 unsafe fn dtz_to_wdl(mut cnt50: i32, mut dtz: i32) -> u32 {
     let mut wdl = 0;
     if dtz > 0 {
@@ -1256,14 +1330,14 @@ unsafe fn map_tb(
 unsafe fn add_to_hash(mut ptr: *mut BaseEntry, mut key: u64) {
     let mut idx: i32 = 0;
     idx = (key >> (64 - 12)) as i32;
-    while !(tbHash[idx as usize].ptr).is_null() {
+    while !((*active_state()).hash[idx as usize].ptr).is_null() {
         idx = (idx + 1) & ((1 << 12) - 1);
     }
-    tbHash[idx as usize].key = key;
-    tbHash[idx as usize].ptr = ptr;
+    (*active_state()).hash[idx as usize].key = key;
+    (*active_state()).hash[idx as usize].ptr = ptr;
 }
 unsafe fn init_tb(mut str: *const c_char) {
-    if test_tb(str, tbSuffix[WDL as i32 as usize]) != 1 {
+    if test_tb(str, TB_SUFFIX[WDL as i32 as usize]) != 1 {
         return;
     }
     let mut pcs: [i32; 16] = [0; 16];
@@ -1291,13 +1365,13 @@ unsafe fn init_tb(mut str: *const c_char) {
     let mut hasPawns: bool =
         pcs[PYRRHIC_WPAWN as i32 as usize] != 0 || pcs[PYRRHIC_BPAWN as i32 as usize] != 0;
     let mut be: *mut BaseEntry = if hasPawns as i32 != 0 {
-        let fresh10 = tbNumPawn;
-        tbNumPawn += 1;
-        &mut (*pawnEntry.offset(fresh10 as isize)).be
+        let fresh10 = (*active_state()).num_pawn;
+        (*active_state()).num_pawn += 1;
+        &mut (*(*active_state()).pawn_entry.offset(fresh10 as isize)).be
     } else {
-        let fresh11 = tbNumPiece;
-        tbNumPiece += 1;
-        &mut (*pieceEntry.offset(fresh11 as isize)).be
+        let fresh11 = (*active_state()).num_piece;
+        (*active_state()).num_piece += 1;
+        &mut (*(*active_state()).piece_entry.offset(fresh11 as isize)).be
     };
     (*be).hasPawns = hasPawns;
     (*be).key = key;
@@ -1308,16 +1382,20 @@ unsafe fn init_tb(mut str: *const c_char) {
         (*be).num = ((*be).num as i32 + pcs[i_0 as usize]) as u8;
         i_0 += 1;
     }
-    numWdl += 1;
-    (*be).hasDtm = test_tb(str, tbSuffix[DTM as i32 as usize]) == 1;
-    numDtm += (*be).hasDtm as i32;
-    (*be).hasDtz = test_tb(str, tbSuffix[DTZ as i32 as usize]) == 1;
-    numDtz += (*be).hasDtz as i32;
-    if (*be).num as i32 > TB_MaxCardinality {
-        TB_MaxCardinality = (*be).num as i32;
+    (*active_state()).num_wdl += 1;
+    (*be).hasDtm = test_tb(str, TB_SUFFIX[DTM as i32 as usize]) == 1;
+    (*active_state()).num_dtm += (*be).hasDtm as i32;
+    (*be).hasDtz = test_tb(str, TB_SUFFIX[DTZ as i32 as usize]) == 1;
+    (*active_state()).num_dtz += (*be).hasDtz as i32;
+    (*active_state()).discovered.push((
+        CStr::from_ptr(str).to_string_lossy().into_owned(),
+        (*be).hasDtz,
+    ));
+    if (*be).num as i32 > (*active_state()).max_cardinality {
+        (*active_state()).max_cardinality = (*be).num as i32;
     }
-    if (*be).hasDtm && (*be).num as i32 > TB_MaxCardinalityDTM {
-        TB_MaxCardinalityDTM = (*be).num as i32;
+    if (*be).hasDtm && (*be).num as i32 > (*active_state()).max_cardinality_dtm {
+        (*active_state()).max_cardinality_dtm = (*be).num as i32;
     }
     for table_type in 0..3 {
         (*be).ready[table_type] = AtomicBool::new(false);
@@ -1408,90 +1486,24 @@ unsafe fn free_tb_entry(be: *mut BaseEntry) {
 }
 
 pub(crate) unsafe fn tb_init(path: &str) -> bool {
-    if initialized == 0 {
-        init_indices();
-        initialized = 1;
-    }
-    TB_LARGEST = 0;
-    TB_NUM_WDL = 0;
-    TB_NUM_DTZ = 0;
-    TB_NUM_DTM = 0;
-    if !pathString.is_null() {
-        free(pathString as *mut libc::c_void);
-        free(paths as *mut libc::c_void);
-        paths = std::ptr::null_mut();
-        let mut i: i32 = 0;
-        while i < tbNumPiece {
-            free_tb_entry(&mut *pieceEntry.offset(i as isize) as *mut PieceEntry as *mut BaseEntry);
-            i += 1;
-        }
-        let mut i_0: i32 = 0;
-        while i_0 < tbNumPawn {
-            free_tb_entry(&mut *pawnEntry.offset(i_0 as isize) as *mut PawnEntry as *mut BaseEntry);
-            i_0 += 1;
-        }
-        pathString = std::ptr::null_mut::<c_char>();
-        numDtz = 0;
-        numDtm = numDtz;
-        numWdl = numDtm;
-    }
-    // let mut p: *const i8 = path;
-    // if strlen(p) == 0 || strcmp(p, b"<empty>\0" as *const u8 as *const i8) == 0 {
-    //     return 1 != 0;
-    // }
+    INDICES_INIT.call_once(|| unsafe { init_indices() });
     if path.is_empty() || path == "<empty>" {
         return true;
     }
-    let Ok(cpath) = CString::new(path) else {
-        return false;
-    };
-    pathString = malloc(path.len() + 1) as *mut c_char;
-    if pathString.is_null() {
-        return false;
-    }
-    strcpy(pathString, cpath.as_ptr());
-    let mut starts = Vec::new();
-    let mut start = 0;
-    for index in 0..=path.len() {
-        if index == path.len() || *pathString.add(index) as i32 == PATH_SEPARATOR {
-            if index > start {
-                starts.push(start);
-            }
-            *pathString.add(index) = 0;
-            start = index + 1;
-        }
-    }
-    numPaths = starts.len() as i32;
-    if !starts.is_empty() {
-        paths = malloc(starts.len() * ::core::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
-        if paths.is_null() {
-            free(pathString as *mut libc::c_void);
-            pathString = std::ptr::null_mut();
+    let state = active_state();
+    for component in path
+        .split(PATH_SEPARATOR)
+        .filter(|component| !component.is_empty())
+    {
+        let Ok(component) = CString::new(component) else {
             return false;
-        }
-        for (index, start) in starts.into_iter().enumerate() {
-            *paths.add(index) = pathString.add(start);
-        }
+        };
+        (*state).paths.push(component);
     }
-    tbNumPawn = 0;
-    tbNumPiece = tbNumPawn;
-    TB_MaxCardinalityDTM = 0;
-    TB_MaxCardinality = TB_MaxCardinalityDTM;
-    if pieceEntry.is_null() {
-        pieceEntry =
-            malloc(650usize.wrapping_mul(::core::mem::size_of::<PieceEntry>())) as *mut PieceEntry;
-        pawnEntry =
-            malloc(861usize.wrapping_mul(::core::mem::size_of::<PawnEntry>())) as *mut PawnEntry;
-        if pieceEntry.is_null() || pawnEntry.is_null() {
-            eprintln!("Out of memory");
-            exit(1);
-        }
-    }
-    let mut i_3: i32 = 0;
-    while i_3 < 1 << 12 {
-        tbHash[i_3 as usize].key = 0;
-        tbHash[i_3 as usize].ptr = std::ptr::null_mut::<BaseEntry>();
-        i_3 += 1;
+    (*state).piece_entry = malloc(650 * ::core::mem::size_of::<PieceEntry>()) as *mut PieceEntry;
+    (*state).pawn_entry = malloc(861 * ::core::mem::size_of::<PawnEntry>()) as *mut PawnEntry;
+    if (*state).piece_entry.is_null() || (*state).pawn_entry.is_null() {
+        return false;
     }
     let mut i_4: i32 = 0;
     let mut j_0: i32 = 0;
@@ -1772,22 +1784,25 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
             i_4 += 1;
         }
     }
-    TB_LARGEST = TB_MaxCardinality;
-    if TB_MaxCardinalityDTM > TB_LARGEST {
-        TB_LARGEST = TB_MaxCardinalityDTM;
+    (*active_state()).largest = (*active_state()).max_cardinality;
+    if (*active_state()).max_cardinality_dtm > (*active_state()).largest {
+        (*active_state()).largest = (*active_state()).max_cardinality_dtm;
     }
-    TB_NUM_WDL = numWdl;
-    TB_NUM_DTZ = numDtz;
-    TB_NUM_DTM = numDtm;
     1 != 0
 }
 
 pub(crate) unsafe fn tb_free() {
-    tb_init("");
-    free(pieceEntry as *mut libc::c_void);
-    free(pawnEntry as *mut libc::c_void);
-    pieceEntry = std::ptr::null_mut();
-    pawnEntry = std::ptr::null_mut();
+    let state = active_state();
+    for i in 0..(*state).num_piece {
+        free_tb_entry(&mut (*(*state).piece_entry.offset(i as isize)).be);
+    }
+    for i in 0..(*state).num_pawn {
+        free_tb_entry(&mut (*(*state).pawn_entry.offset(i as isize)).be);
+    }
+    free((*state).piece_entry as *mut libc::c_void);
+    free((*state).pawn_entry as *mut libc::c_void);
+    (*state).piece_entry = std::ptr::null_mut();
+    (*state).pawn_entry = std::ptr::null_mut();
 }
 #[rustfmt::skip]
 const OFF_DIAG: [i8; 64] = [
@@ -2472,7 +2487,7 @@ unsafe fn setup_pairs(
 unsafe fn init_table(be: *mut BaseEntry, str: *const c_char, type_0: i32) -> bool {
     let mut mmap = map_tb(
         str,
-        tbSuffix[type_0 as usize],
+        TB_SUFFIX[type_0 as usize],
         &mut *((*be).mapping).as_mut_ptr().offset(type_0 as isize),
     );
     if mmap.is_null() {
@@ -2778,19 +2793,20 @@ pub(crate) unsafe fn probe_table(
     mut success: *mut i32,
     type_0: i32,
 ) -> i32 {
+    let state = active_state();
     let mut key: u64 = pyrrhic_calc_key(pos, 0);
     if type_0 == WDL as i32 && key == 0 {
         return 0;
     }
     let mut hashIdx: i32 = (key >> (64 - 12)) as i32;
-    while tbHash[hashIdx as usize].key != 0 && tbHash[hashIdx as usize].key != key {
+    while (*state).hash[hashIdx as usize].key != 0 && (*state).hash[hashIdx as usize].key != key {
         hashIdx = (hashIdx + 1) & ((1 << 12) - 1);
     }
-    if (tbHash[hashIdx as usize].ptr).is_null() {
+    if ((*state).hash[hashIdx as usize].ptr).is_null() {
         *success = 0;
         return 0;
     }
-    let mut be: *mut BaseEntry = tbHash[hashIdx as usize].ptr;
+    let mut be: *mut BaseEntry = (*state).hash[hashIdx as usize].ptr;
     if type_0 == DTM as i32 && !(*be).hasDtm || type_0 == DTZ as i32 && !(*be).hasDtz {
         *success = 0;
         return 0;

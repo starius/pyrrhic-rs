@@ -139,6 +139,20 @@ fn bad_path_does_not_block_later_initialization() {
 }
 
 #[test]
+fn wdl_only_directory_does_not_claim_dtz_coverage() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-wdl-only-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("KQvK.rtbw")).unwrap();
+    file.set_len(80).unwrap();
+    let tb = TableBases::<CozyChessAdapter>::new(dir.to_str().unwrap()).unwrap();
+    assert_eq!(tb.max_pieces(), 3);
+    assert_eq!(unsafe { crate::tbprobe::TB_NUM_WDL }, 1);
+    assert_eq!(unsafe { crate::tbprobe::TB_NUM_DTZ }, 0);
+    drop(tb);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";
     let first_tb = loop {

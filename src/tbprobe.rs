@@ -1262,9 +1262,9 @@ unsafe fn init_tb(mut str: *const c_char) {
         i_0 += 1;
     }
     numWdl += 1;
-    (*be).hasDtm = test_tb(str, tbSuffix[DTM as i32 as usize]) != 0;
+    (*be).hasDtm = test_tb(str, tbSuffix[DTM as i32 as usize]) == 1;
     numDtm += (*be).hasDtm as i32;
-    (*be).hasDtz = test_tb(str, tbSuffix[DTZ as i32 as usize]) != 0;
+    (*be).hasDtz = test_tb(str, tbSuffix[DTZ as i32 as usize]) == 1;
     numDtz += (*be).hasDtz as i32;
     if (*be).num as i32 > TB_MaxCardinality {
         TB_MaxCardinality = (*be).num as i32;

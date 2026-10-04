@@ -14,15 +14,15 @@ enum TableType {
     Dtz,
 }
 extern "C" {
-    fn perror(__s: *const i8);
-    fn malloc(_: u64) -> *mut libc::c_void;
+    fn perror(__s: *const c_char);
+    fn malloc(_: usize) -> *mut libc::c_void;
     fn free(_: *mut libc::c_void);
     fn exit(_: i32) -> !;
-    fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: u64) -> *mut libc::c_void;
-    fn memset(_: *mut libc::c_void, _: i32, _: u64) -> *mut libc::c_void;
+    fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: usize) -> *mut libc::c_void;
+    fn memset(_: *mut libc::c_void, _: i32, _: usize) -> *mut libc::c_void;
     fn strcpy(_: *mut c_char, _: *const c_char) -> *mut c_char;
     fn strcmp(_: *const c_char, _: *const c_char) -> i32;
-    fn strlen(_: *const c_char) -> u64;
+    fn strlen(_: *const c_char) -> usize;
 }
 
 pub(crate) const PYRRHIC_PRIME_BPAWN: u64 = 11695583624105689831;
@@ -229,7 +229,11 @@ static TB_MUTEX: Mutex<()> = Mutex::new(());
 static mut initialized: i32 = 0;
 static mut numPaths: i32 = 0;
 // Windows drive letters contain ':', so its tablebase path list uses ';'.
-const PATH_SEPARATOR: i32 = if cfg!(windows) { ';' as i32 } else { ':' as i32 };
+const PATH_SEPARATOR: i32 = if cfg!(windows) {
+    ';' as i32
+} else {
+    ':' as i32
+};
 static mut pathString: *mut c_char = 0 as *const c_char as *mut c_char;
 static mut paths: *mut *mut c_char = 0 as *const *mut c_char as *mut *mut c_char;
 
@@ -1397,7 +1401,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     }
     // pathString = malloc((strlen(p)).wrapping_add(1)) as *mut i8;
     // strcpy(pathString, p);
-    pathString = malloc(path.len() as u64 + 1) as *mut c_char;
+    pathString = malloc(path.len() + 1) as *mut c_char;
     let cpath = CString::new(path.as_bytes()).unwrap();
 
     strcpy(pathString, cpath.as_ptr());
@@ -1418,7 +1422,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
         *pathString.offset(i_1 as isize) = 0;
         i_1 += 1;
     }
-    paths = malloc((numPaths as u64).wrapping_mul(::core::mem::size_of::<*mut c_char>() as u64))
+    paths = malloc((numPaths as usize).wrapping_mul(::core::mem::size_of::<*mut c_char>()))
         as *mut *mut c_char;
     let mut i_2: i32 = 0;
     let mut j: i32 = 0;
@@ -1438,10 +1442,10 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     TB_MaxCardinalityDTM = 0;
     TB_MaxCardinality = TB_MaxCardinalityDTM;
     if pieceEntry.is_null() {
-        pieceEntry = malloc(650u64.wrapping_mul(::core::mem::size_of::<PieceEntry>() as u64))
-            as *mut PieceEntry;
-        pawnEntry = malloc(861u64.wrapping_mul(::core::mem::size_of::<PawnEntry>() as u64))
-            as *mut PawnEntry;
+        pieceEntry =
+            malloc(650usize.wrapping_mul(::core::mem::size_of::<PieceEntry>())) as *mut PieceEntry;
+        pawnEntry =
+            malloc(861usize.wrapping_mul(::core::mem::size_of::<PawnEntry>())) as *mut PawnEntry;
         if pieceEntry.is_null() || pawnEntry.is_null() {
             eprintln!("Out of memory");
             exit(1);
@@ -2347,7 +2351,7 @@ unsafe fn setup_pairs(
     let mut data: *mut u8 = *ptr;
     *flags = *data.offset(0);
     if *data.offset(0) as i32 & 0x80 != 0 {
-        d = malloc(::core::mem::size_of::<PairsData>() as u64) as *mut PairsData;
+        d = malloc(::core::mem::size_of::<PairsData>()) as *mut PairsData;
         (*d).idxBits = 0;
         (*d).constValue[0] = (if type_0 == WDL as i32 {
             *data.offset(1) as i32
@@ -2373,9 +2377,9 @@ unsafe fn setup_pairs(
     let mut numSyms: u32 =
         read_le_u16(data.offset(10).offset((2 * h) as isize) as *mut libc::c_void) as u32;
     d = malloc(
-        (::core::mem::size_of::<PairsData>() as u64)
-            .wrapping_add((h as u64).wrapping_mul(::core::mem::size_of::<u64>() as u64))
-            .wrapping_add(numSyms as u64),
+        ::core::mem::size_of::<PairsData>()
+            .wrapping_add((h as usize).wrapping_mul(::core::mem::size_of::<u64>()))
+            .wrapping_add(numSyms as usize),
     ) as *mut PairsData;
     (*d).blockSize = blockSize;
     (*d).idxBits = idxBits;
@@ -2399,7 +2403,7 @@ unsafe fn setup_pairs(
     *size.offset(2) = (realNumBlocks as u64) << blockSize as i32;
     assert!(numSyms < 4096);
     let mut tmp: [i8; 4096] = [0; 4096];
-    memset(tmp.as_mut_ptr() as *mut libc::c_void, 0, numSyms as u64);
+    memset(tmp.as_mut_ptr() as *mut libc::c_void, 0, numSyms as usize);
     let mut s: u32 = 0;
     while s < numSyms {
         if tmp[s as usize] == 0 {
@@ -2637,7 +2641,7 @@ unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *mut u8 {
     memcpy(
         &mut block as *mut u32 as *mut libc::c_void,
         ((*d).indexTable).offset((6 * mainIdx) as isize) as *const libc::c_void,
-        ::core::mem::size_of::<u32>() as u64,
+        ::core::mem::size_of::<u32>(),
     );
     block = u32::from_le(block);
     let mut idxOffset: u16 =

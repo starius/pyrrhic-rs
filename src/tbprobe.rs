@@ -11,6 +11,7 @@ use crate::{
     storage::TableBytes,
     table_decoder::decode_pair,
     table_encoder::{encode_squares, fill_squares, leading_pawn},
+    table_moves::{generate_captures, generate_moves, MoveError, MoveList},
     table_parser::{parse_table, Description, ParsedTable},
 };
 
@@ -555,262 +556,17 @@ pub(crate) fn pyrrhic_make_move(promote: u32, from: u32, to: u32) -> PyrrhicMove
     ((promote & 0x7) << 12 | (from & 0x3f) << 6 | to & 0x3f) as PyrrhicMove
 }
 
-pub(crate) unsafe fn pyrrhic_add_move(
-    mut moves: *mut PyrrhicMove,
-    promotes: i32,
-    from: u32,
-    to: u32,
-) -> *mut PyrrhicMove {
-    if promotes == 0 {
-        let fresh0 = moves;
-        moves = moves.offset(1);
-        *fresh0 = pyrrhic_make_move(PYRRHIC_PROMOTES_NONE, from, to);
-    } else {
-        let fresh1 = moves;
-        moves = moves.offset(1);
-        *fresh1 = pyrrhic_make_move(PYRRHIC_PROMOTES_QUEEN, from, to);
-        let fresh2 = moves;
-        moves = moves.offset(1);
-        *fresh2 = pyrrhic_make_move(PYRRHIC_PROMOTES_KNIGHT, from, to);
-        let fresh3 = moves;
-        moves = moves.offset(1);
-        *fresh3 = pyrrhic_make_move(PYRRHIC_PROMOTES_ROOK, from, to);
-        let fresh4 = moves;
-        moves = moves.offset(1);
-        *fresh4 = pyrrhic_make_move(PYRRHIC_PROMOTES_BISHOP, from, to);
+unsafe fn generate_legal<E: EngineAdapter>(
+    position: &PyrrhicPosition,
+) -> Result<MoveList<256>, MoveError> {
+    let pseudo = generate_moves::<E>(position)?;
+    let mut legal = MoveList::new();
+    for &candidate in pseudo.as_slice() {
+        if pyrrhic_legal_move::<E>(position, candidate) {
+            legal.push(candidate)?;
+        }
     }
-    moves
-}
-
-pub(crate) unsafe fn pyrrhic_gen_captures<E: EngineAdapter>(
-    pos: *const PyrrhicPosition,
-    mut moves: *mut PyrrhicMove,
-) -> *mut PyrrhicMove {
-    let mut us: u64 = if (*pos).turn {
-        (*pos).white
-    } else {
-        (*pos).black
-    };
-    let mut them: u64 = if (*pos).turn {
-        (*pos).black
-    } else {
-        (*pos).white
-    };
-    let mut b: u64 = 0;
-    let mut att: u64 = 0;
-    b = us & (*pos).kings;
-    while b != 0 {
-        att = E::king_attacks(getlsb(b)) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & ((*pos).rooks | (*pos).queens);
-    while b != 0 {
-        att = E::rook_attacks(getlsb(b), us | them) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & ((*pos).bishops | (*pos).queens);
-    while b != 0 {
-        att = E::bishop_attacks(getlsb(b), us | them) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & (*pos).knights;
-    while b != 0 {
-        att = E::knight_attacks(getlsb(b)) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & (*pos).pawns;
-    while b != 0 {
-        if (*pos).ep as i32 != 0
-            && pyrrhic_test_bit(
-                E::pawn_attacks(
-                    if (*pos).turn {
-                        Color::White
-                    } else {
-                        Color::Black
-                    },
-                    getlsb(b),
-                ),
-                (*pos).ep as i32,
-            ) as i32
-                != 0
-        {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, (*pos).ep as u32);
-        }
-        att = E::pawn_attacks(
-            if (*pos).turn {
-                Color::White
-            } else {
-                Color::Black
-            },
-            getlsb(b),
-        ) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(
-                moves,
-                pyrrhic_promo_square(getlsb(att) as i32) as i32,
-                getlsb(b) as u32,
-                getlsb(att) as u32,
-            );
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    moves
-}
-
-pub(crate) unsafe fn pyrrhic_gen_moves<E: EngineAdapter>(
-    pos: *const PyrrhicPosition,
-    mut moves: *mut PyrrhicMove,
-) -> *mut PyrrhicMove {
-    let Forward: i32 = if (*pos).turn as i32 == PYRRHIC_WHITE as i32 {
-        8
-    } else {
-        -8
-    };
-    let mut us: u64 = if (*pos).turn {
-        (*pos).white
-    } else {
-        (*pos).black
-    };
-    let mut them: u64 = if (*pos).turn {
-        (*pos).black
-    } else {
-        (*pos).white
-    };
-    let mut b: u64 = 0;
-    let mut att: u64 = 0;
-    b = us & (*pos).kings;
-    while b != 0 {
-        att = E::king_attacks(getlsb(b)) & !us;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & ((*pos).rooks | (*pos).queens);
-    while b != 0 {
-        att = E::rook_attacks(getlsb(b), us | them) & !us;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & ((*pos).bishops | (*pos).queens);
-    while b != 0 {
-        att = E::bishop_attacks(getlsb(b), us | them) & !us;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & (*pos).knights;
-    while b != 0 {
-        att = E::knight_attacks(getlsb(b)) & !us;
-        while att != 0 {
-            moves = pyrrhic_add_move(moves, 0, getlsb(b) as u32, getlsb(att) as u32);
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    b = us & (*pos).pawns;
-    while b != 0 {
-        let mut from: u32 = getlsb(b) as u32;
-        if (*pos).ep as i32 != 0
-            && pyrrhic_test_bit(
-                E::pawn_attacks(
-                    if (*pos).turn {
-                        Color::White
-                    } else {
-                        Color::Black
-                    },
-                    from as u64,
-                ),
-                (*pos).ep as i32,
-            ) as i32
-                != 0
-        {
-            moves = pyrrhic_add_move(moves, 0, from, (*pos).ep as u32);
-        }
-        if !pyrrhic_test_bit(us | them, (from as i32).wrapping_add(Forward)) {
-            moves = pyrrhic_add_move(
-                moves,
-                pyrrhic_promo_square((from as i32).wrapping_add(Forward)) as i32,
-                from,
-                (from as i32).wrapping_add(Forward) as u32,
-            );
-        }
-        if pyrrhic_pawn_start_square((*pos).turn as i32, from as i32) as i32 != 0
-            && !pyrrhic_test_bit(us | them, (from as i32).wrapping_add(Forward))
-            && !pyrrhic_test_bit(
-                us | them,
-                (from as i32).wrapping_add(2i32.wrapping_mul(Forward)),
-            )
-        {
-            moves = pyrrhic_add_move(
-                moves,
-                0,
-                from,
-                (from as i32).wrapping_add(2i32.wrapping_mul(Forward)) as u32,
-            );
-        }
-        att = E::pawn_attacks(
-            if (*pos).turn {
-                Color::White
-            } else {
-                Color::Black
-            },
-            from as u64,
-        ) & them;
-        while att != 0 {
-            moves = pyrrhic_add_move(
-                moves,
-                pyrrhic_promo_square(getlsb(att) as i32) as i32,
-                from,
-                getlsb(att) as u32,
-            );
-            poplsb(&mut att);
-        }
-        poplsb(&mut b);
-    }
-    moves
-}
-
-pub(crate) unsafe fn pyrrhic_gen_legal<E: EngineAdapter>(
-    pos: *const PyrrhicPosition,
-    moves: *mut PyrrhicMove,
-) -> *mut PyrrhicMove {
-    let mut _moves: [PyrrhicMove; 256] = [0; 256];
-    let mut end: *mut PyrrhicMove = pyrrhic_gen_moves::<E>(pos, _moves.as_mut_ptr());
-    let mut results: *mut PyrrhicMove = moves;
-    let mut m: *mut PyrrhicMove = _moves.as_mut_ptr();
-    while m < end {
-        if pyrrhic_legal_move::<E>(pos, *m) {
-            let fresh5 = results;
-            results = results.offset(1);
-            *fresh5 = *m;
-        }
-        m = m.offset(1);
-    }
-    results
+    Ok(legal)
 }
 
 pub(crate) unsafe fn pyrrhic_is_pawn_move(
@@ -901,9 +657,11 @@ pub(crate) unsafe fn pyrrhic_is_check<E: EngineAdapter>(mut pos: *const PyrrhicP
             != 0
 }
 
-pub(crate) unsafe fn pyrrhic_is_mate<E: EngineAdapter>(mut pos: *const PyrrhicPosition) -> bool {
+pub(crate) unsafe fn pyrrhic_is_mate<E: EngineAdapter>(
+    pos: *const PyrrhicPosition,
+) -> Result<bool, MoveError> {
     if !pyrrhic_is_check::<E>(pos) {
-        return false;
+        return Ok(false);
     }
     let mut pos1: PyrrhicPosition = PyrrhicPosition {
         white: 0,
@@ -918,16 +676,13 @@ pub(crate) unsafe fn pyrrhic_is_mate<E: EngineAdapter>(mut pos: *const PyrrhicPo
         ep: 0,
         turn: false,
     };
-    let mut moves0: [PyrrhicMove; 256] = [0; 256];
-    let mut moves: *mut PyrrhicMove = moves0.as_mut_ptr();
-    let mut end: *mut PyrrhicMove = pyrrhic_gen_moves::<E>(pos, moves);
-    while moves < end {
-        if pyrrhic_do_move::<E>(&mut pos1, pos, *moves) {
-            return false;
+    let moves = generate_moves::<E>(&*pos)?;
+    for &candidate in moves.as_slice() {
+        if pyrrhic_do_move::<E>(&mut pos1, pos, candidate) {
+            return Ok(false);
         }
-        moves = moves.offset(1);
     }
-    1 != 0
+    Ok(true)
 }
 
 pub(crate) unsafe fn pyrrhic_do_move<E: EngineAdapter>(
@@ -2290,10 +2045,14 @@ unsafe fn probe_ab<E: EngineAdapter>(
     mut success: *mut i32,
 ) -> i32 {
     assert!((*pos).ep == 0);
-    let mut moves0: [PyrrhicMove; 64] = [0; 64];
-    let mut m: *mut PyrrhicMove = moves0.as_mut_ptr();
-    let mut end: *mut PyrrhicMove = pyrrhic_gen_captures::<E>(pos, m);
-    while m < end {
+    let moves = match generate_captures::<E>(&*pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            *success = 0;
+            return 0;
+        }
+    };
+    for &move_0 in moves.as_slice() {
         let mut pos1: PyrrhicPosition = PyrrhicPosition {
             white: 0,
             black: 0,
@@ -2307,7 +2066,6 @@ unsafe fn probe_ab<E: EngineAdapter>(
             ep: 0,
             turn: false,
         };
-        let mut move_0: PyrrhicMove = *m;
         if pyrrhic_is_capture(pos, move_0) && pyrrhic_do_move::<E>(&mut pos1, pos, move_0) {
             let mut v: i32 = -probe_ab::<E>(owner, &pos1, -beta, -alpha, success);
             if *success == 0 {
@@ -2320,7 +2078,6 @@ unsafe fn probe_ab<E: EngineAdapter>(
                 alpha = v;
             }
         }
-        m = m.offset(1);
     }
     let mut v_0: i32 = probe_wdl_table(owner, pos, success);
     if alpha >= v_0 {
@@ -2335,12 +2092,16 @@ unsafe fn probe_wdl<E: EngineAdapter>(
     mut success: *mut i32,
 ) -> i32 {
     *success = 1;
-    let mut moves0: [PyrrhicMove; 64] = [0; 64];
-    let mut m: *mut PyrrhicMove = moves0.as_mut_ptr();
-    let mut end: *mut PyrrhicMove = pyrrhic_gen_captures::<E>(pos, m);
+    let moves = match generate_captures::<E>(&*pos) {
+        Ok(moves) => moves,
+        Err(_) => {
+            *success = 0;
+            return 0;
+        }
+    };
     let mut bestCap: i32 = -3;
     let mut bestEp: i32 = -3;
-    while m < end {
+    for &move_0 in moves.as_slice() {
         let mut pos1: PyrrhicPosition = PyrrhicPosition {
             white: 0,
             black: 0,
@@ -2354,7 +2115,6 @@ unsafe fn probe_wdl<E: EngineAdapter>(
             ep: 0,
             turn: false,
         };
-        let mut move_0: PyrrhicMove = *m;
         if pyrrhic_is_capture(pos, move_0) && pyrrhic_do_move::<E>(&mut pos1, pos, move_0) {
             let mut v: i32 = -probe_ab::<E>(owner, &pos1, -2, -bestCap, success);
             if *success == 0 {
@@ -2372,7 +2132,6 @@ unsafe fn probe_wdl<E: EngineAdapter>(
                 }
             }
         }
-        m = m.offset(1);
     }
     let mut v_0: i32 = probe_wdl_table(owner, pos, success);
     if *success == 0 {
@@ -2390,16 +2149,17 @@ unsafe fn probe_wdl<E: EngineAdapter>(
         return bestCap;
     }
     if bestEp > -3 && v_0 == 0 {
-        let mut moves: [PyrrhicMove; 256] = [0; 256];
-        let mut end2: *mut PyrrhicMove = pyrrhic_gen_moves::<E>(pos, moves.as_mut_ptr());
-        m = moves.as_mut_ptr();
-        while m < end2 {
-            if !pyrrhic_is_en_passant(pos, *m) && pyrrhic_legal_move::<E>(pos, *m) as i32 != 0 {
-                break;
+        let moves = match generate_moves::<E>(&*pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                *success = 0;
+                return 0;
             }
-            m = m.offset(1);
-        }
-        if m == end2 && !pyrrhic_is_check::<E>(pos) {
+        };
+        let has_non_ep_legal = moves.as_slice().iter().any(|&candidate| {
+            !pyrrhic_is_en_passant(pos, candidate) && pyrrhic_legal_move::<E>(pos, candidate)
+        });
+        if !has_non_ep_legal && !pyrrhic_is_check::<E>(pos) {
             *success = 2;
             return bestEp;
         }
@@ -2422,9 +2182,7 @@ unsafe fn probe_dtz<E: EngineAdapter>(
     if *success == 2 {
         return WDL_TO_DTZ[(wdl + 2) as usize];
     }
-    let mut moves: [PyrrhicMove; 256] = [0; 256];
-    let mut m: *mut PyrrhicMove = moves.as_mut_ptr();
-    let mut end: *mut PyrrhicMove = std::ptr::null_mut::<PyrrhicMove>();
+    let mut legal_moves: Option<MoveList<256>> = None;
     let mut pos1: PyrrhicPosition = PyrrhicPosition {
         white: 0,
         black: 0,
@@ -2439,10 +2197,14 @@ unsafe fn probe_dtz<E: EngineAdapter>(
         turn: false,
     };
     if wdl > 0 {
-        end = pyrrhic_gen_legal::<E>(pos, moves.as_mut_ptr());
-        m = moves.as_mut_ptr();
-        while m < end {
-            let mut move_0: PyrrhicMove = *m;
+        let moves = match generate_legal::<E>(&*pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                *success = 0;
+                return 0;
+            }
+        };
+        for &move_0 in moves.as_slice() {
             if !(!pyrrhic_is_pawn_move(pos, move_0) || pyrrhic_is_capture(pos, move_0) as i32 != 0)
                 && pyrrhic_do_move::<E>(&mut pos1, pos, move_0)
             {
@@ -2455,8 +2217,8 @@ unsafe fn probe_dtz<E: EngineAdapter>(
                     return WDL_TO_DTZ[(wdl + 2) as usize];
                 }
             }
-            m = m.offset(1);
         }
+        legal_moves = Some(moves);
     }
     let mut dtz: i32 = probe_dtz_table(owner, pos, wdl, success);
     if *success >= 0 {
@@ -2467,18 +2229,36 @@ unsafe fn probe_dtz<E: EngineAdapter>(
         best = 2147483647;
     } else {
         best = WDL_TO_DTZ[(wdl + 2) as usize];
-        end = pyrrhic_gen_moves::<E>(pos, m);
     }
-    assert!(!end.is_null());
-    m = moves.as_mut_ptr();
-    while m < end {
-        let mut move_1: PyrrhicMove = *m;
+    let moves = if let Some(moves) = legal_moves {
+        moves
+    } else {
+        match generate_moves::<E>(&*pos) {
+            Ok(moves) => moves,
+            Err(_) => {
+                *success = 0;
+                return 0;
+            }
+        }
+    };
+    for &move_1 in moves.as_slice() {
         if !(pyrrhic_is_capture(pos, move_1) as i32 != 0
             || pyrrhic_is_pawn_move(pos, move_1) as i32 != 0)
             && pyrrhic_do_move::<E>(&mut pos1, pos, move_1)
         {
             let mut v_0: i32 = -probe_dtz::<E>(owner, &mut pos1, success);
-            if v_0 == 1 && pyrrhic_is_mate::<E>(&pos1) as i32 != 0 {
+            let mate = if v_0 == 1 {
+                match pyrrhic_is_mate::<E>(&pos1) {
+                    Ok(mate) => mate,
+                    Err(_) => {
+                        *success = 0;
+                        return 0;
+                    }
+                }
+            } else {
+                false
+            };
+            if mate {
                 best = 1;
             } else if wdl > 0 {
                 if v_0 > 0 && (v_0 + 1) < best {
@@ -2491,7 +2271,6 @@ unsafe fn probe_dtz<E: EngineAdapter>(
                 return 0;
             }
         }
-        m = m.offset(1);
     }
     best
 }
@@ -2508,14 +2287,18 @@ unsafe fn probe_root<E: EngineAdapter>(
         return 0;
     }
     let mut scores: [i16; 256] = [0; 256];
-    let mut moves0: [u16; 256] = [0; 256];
-    let mut moves: *mut u16 = moves0.as_mut_ptr();
-    let mut end: *mut u16 = pyrrhic_gen_moves::<E>(pos, moves);
-    let mut len: u64 = end.offset_from(moves) as i64 as u64;
+    let moves = match generate_moves::<E>(&*pos) {
+        Ok(moves) => moves,
+        Err(_) => return 0,
+    };
+    let len = moves.len();
+    if !results.is_null() && len >= 256 {
+        return 0;
+    }
     let mut num_draw: u64 = 0;
     let mut j: u32 = 0;
     let mut i: u32 = 0;
-    while (i as u64) < len {
+    while (i as usize) < len {
         let mut pos1: PyrrhicPosition = PyrrhicPosition {
             white: 0,
             black: 0,
@@ -2529,11 +2312,20 @@ unsafe fn probe_root<E: EngineAdapter>(
             ep: 0,
             turn: false,
         };
-        if !pyrrhic_do_move::<E>(&mut pos1, pos, *moves.offset(i as isize)) {
+        let candidate = moves.as_slice()[i as usize];
+        if !pyrrhic_do_move::<E>(&mut pos1, pos, candidate) {
             scores[i as usize] = 0x7fff;
         } else {
             let mut v: i32 = 0;
-            if dtz > 0 && pyrrhic_is_mate::<E>(&pos1) as i32 != 0 {
+            let mate = if dtz > 0 {
+                match pyrrhic_is_mate::<E>(&pos1) {
+                    Ok(mate) => mate,
+                    Err(_) => return 0,
+                }
+            } else {
+                false
+            };
+            if mate {
                 v = 1;
             } else if pos1.rule50 as i32 != 0 {
                 v = -probe_dtz::<E>(owner, &mut pos1, &mut success);
@@ -2554,13 +2346,11 @@ unsafe fn probe_root<E: EngineAdapter>(
             if !results.is_null() {
                 let mut res: u32 = 0;
                 res = res & !0xf | dtz_to_wdl((*pos).rule50 as i32, v) & 0xf;
-                res = res & !0xfc00 | pyrrhic_move_from(*moves.offset(i as isize)) << 10 & 0xfc00;
-                res = res & !0x3f0 | pyrrhic_move_to(*moves.offset(i as isize)) << 4 & 0x3f0;
-                res = res & !0x70000
-                    | pyrrhic_move_promotes(*moves.offset(i as isize)) << 16 & 0x70000;
+                res = res & !0xfc00 | pyrrhic_move_from(candidate) << 10 & 0xfc00;
+                res = res & !0x3f0 | pyrrhic_move_to(candidate) << 4 & 0x3f0;
+                res = res & !0x70000 | pyrrhic_move_promotes(candidate) << 16 & 0x70000;
                 res = res & !(0x80000)
-                    | ((pyrrhic_is_en_passant(pos, *moves.offset(i as isize)) as i32) << 19
-                        & 0x80000) as u32;
+                    | ((pyrrhic_is_en_passant(pos, candidate) as i32) << 19 & 0x80000) as u32;
                 res =
                     res & !(0xfff00000) | ((if v < 0 { -v } else { v }) << 20) as u32 & 0xfff00000;
                 let fresh29 = j;
@@ -2582,11 +2372,11 @@ unsafe fn probe_root<E: EngineAdapter>(
         let mut best: i32 = 0xffff;
         let mut best_move: u16 = 0;
         let mut i_0: u32 = 0;
-        while (i_0 as u64) < len {
+        while (i_0 as usize) < len {
             let mut v_0: i32 = scores[i_0 as usize] as i32;
             if v_0 != 0x7fff as i32 && v_0 > 0 && v_0 < best {
                 best = v_0;
-                best_move = *moves.offset(i_0 as isize);
+                best_move = moves.as_slice()[i_0 as usize];
             }
             i_0 = i_0.wrapping_add(1);
         }
@@ -2599,11 +2389,11 @@ unsafe fn probe_root<E: EngineAdapter>(
         let mut best_0: i32 = 0;
         let mut best_move_0: u16 = 0;
         let mut i_1: u32 = 0;
-        while (i_1 as u64) < len {
+        while (i_1 as usize) < len {
             let mut v_1: i32 = scores[i_1 as usize] as i32;
             if v_1 != 0x7fff as i32 && v_1 < best_0 {
                 best_0 = v_1;
-                best_move_0 = *moves.offset(i_1 as isize);
+                best_move_0 = moves.as_slice()[i_1 as usize];
             }
             i_1 = i_1.wrapping_add(1);
         }
@@ -2618,11 +2408,11 @@ unsafe fn probe_root<E: EngineAdapter>(
         }
         let mut count: u64 = (pyrrhic_calc_key(pos, !(*pos).turn as i32)).wrapping_rem(num_draw);
         let mut i_2: u32 = 0;
-        while (i_2 as u64) < len {
+        while (i_2 as usize) < len {
             let mut v_2: i32 = scores[i_2 as usize] as i32;
             if v_2 != 0x7fff as i32 && v_2 == 0 {
                 if count == 0 {
-                    return *moves.offset(i_2 as isize);
+                    return moves.as_slice()[i_2 as usize];
                 }
                 count = count.wrapping_sub(1);
             }

@@ -2,7 +2,7 @@ use std::{
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
 };
 
@@ -98,6 +98,7 @@ pub struct TableBases<E: EngineAdapter> {
 // guard against multiple initialization and freeing
 #[doc(hidden)]
 static TB_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static ROOT_PROBE_MUTEX: Mutex<()> = Mutex::new(());
 
 impl<E: EngineAdapter> TableBases<E> {
     /// Initialize the tablebases
@@ -170,8 +171,8 @@ impl<E: EngineAdapter> TableBases<E> {
     /// Probe the Distance-To-Zero (DTZ) tables.
     ///
     /// ## Notes:
-    /// The underlying `probe_root` function is not thread safe, and attempts to call this function while multiple
-    /// `TableBases` exist will return `TBError::NotSingleton`
+    /// The underlying `probe_root` function is not thread safe. Root probes
+    /// are serialized so shared handles can still select tablebase moves.
     #[allow(clippy::too_many_arguments)]
     pub fn probe_root(
         &self,
@@ -187,12 +188,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<DtzProbeResult, TBError> {
-        // tb_probe_root is NOT thread safe, only allow if there is only one thread using the tablebases
-        // This thread is the only one that can change the strong count from 1 to more, and will be busy
-        // probing until this function returns
-        if Arc::strong_count(&self.handle) > 1 {
-            return Err(TBError::NotSingleton);
-        }
+        let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
         let mut results = [0u32; 256];
         let result = unsafe {
             tb_probe_root::<E>(

@@ -235,3 +235,25 @@ fn test_multithread() {
     }
     worker.join().unwrap();
 }
+
+#[test]
+fn root_probe_works_with_cloned_worker_handle() {
+    let tb = TableBases::<CozyChessAdapter>::new(SYZYGY_PATH).unwrap();
+    let worker = tb.clone();
+    let board = Board::from_str("8/7k/8/8/8/8/8/Q3K3 w - - 0 1").unwrap();
+    let result = tb.probe_root(
+        board.colors(cozy_chess::Color::White).0,
+        board.colors(cozy_chess::Color::Black).0,
+        board.pieces(Piece::King).0,
+        board.pieces(Piece::Queen).0,
+        board.pieces(Piece::Rook).0,
+        board.pieces(Piece::Bishop).0,
+        board.pieces(Piece::Knight).0,
+        board.pieces(Piece::Pawn).0,
+        0,
+        0,
+        true,
+    );
+    assert!(matches!(result.unwrap().root, DtzProbeValue::DtzResult(_)));
+    std::hint::black_box(worker);
+}

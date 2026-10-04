@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Bounded pseudo-legal tablebase move generation. Move order matches the
 //! original probe because root tie selection depends on it.
 

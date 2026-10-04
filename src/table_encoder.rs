@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Bounded position-to-table indexing. The input describes one validated
 //! tablebase position and uses fixed stack storage throughout a warm probe.
 

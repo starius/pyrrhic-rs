@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Safe, allocation-free decoding of one validated Syzygy pair value.
 
 use crate::table_parser::{PairHeader, ParsedPair};

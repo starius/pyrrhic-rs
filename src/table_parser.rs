@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Checked Syzygy metadata parsing. Decoding uses the same parsed factors and
 //! piece order as the legacy probe while the remaining decoder is converted.
 

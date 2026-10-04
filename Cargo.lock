@@ -58,7 +58,6 @@ name = "pyrrhic-rs"
 version = "0.2.0"
 dependencies = [
  "cozy-chess",
- "libc",
  "memmap2",
  "serde",
  "serde_json",

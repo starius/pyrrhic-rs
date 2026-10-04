@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Value-based tablebase position transitions and king safety checks.
 
 use crate::{

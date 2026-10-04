@@ -18,7 +18,6 @@ name = "pyrrhic_rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-libc = "0.2"
 memmap2 = "0.9.4"
 
 [dev-dependencies]

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 /// The color of a chess player
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Color {

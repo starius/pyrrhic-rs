@@ -1,0 +1,36 @@
+[package]
+name = "syzygy-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pyrrhic-rs = { path = "../..", features = ["fuzzing"] }
+cozy-chess = "0.3.3"
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decoder"
+path = "fuzz_targets/decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "public_position"
+path = "fuzz_targets/public_position.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

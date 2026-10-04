@@ -1,19 +1,15 @@
-//! Value-based Syzygy probing. Table lookup remains behind the temporary
-//! checked bridge in `tbprobe` until discovery is converted to owned state.
+//! Value-based Syzygy probing over owned, immutable table generations.
 #![forbid(unsafe_code)]
 
 use crate::{
     engine_adapter::EngineAdapter,
+    table_lookup::{material_key, probe_table_value, Generation, TableProbeValue},
     table_moves::{generate_captures, generate_moves, MoveList},
     table_position::{
         apply_move, is_capture, is_en_passant, is_pawn_move, side_to_move_is_in_check,
     },
     tbprobe::{
-        probe_table_value, pyrrhic_move_from, pyrrhic_move_promotes, pyrrhic_move_to, Generation,
-        PyrrhicMove, PyrrhicPosition, TableProbeValue, PYRRHIC_PRIME_BBISHOP,
-        PYRRHIC_PRIME_BKNIGHT, PYRRHIC_PRIME_BPAWN, PYRRHIC_PRIME_BQUEEN, PYRRHIC_PRIME_BROOK,
-        PYRRHIC_PRIME_WBISHOP, PYRRHIC_PRIME_WKNIGHT, PYRRHIC_PRIME_WPAWN, PYRRHIC_PRIME_WQUEEN,
-        PYRRHIC_PRIME_WROOK,
+        pyrrhic_move_from, pyrrhic_move_promotes, pyrrhic_move_to, PyrrhicMove, PyrrhicPosition,
     },
 };
 
@@ -282,35 +278,6 @@ fn pack_move(pos: &PyrrhicPosition, candidate: PyrrhicMove, dtz: i32) -> u32 {
         | (pyrrhic_move_promotes(candidate) << 16)
         | (u32::from(is_en_passant(pos, candidate)) << 19)
         | (dtz.unsigned_abs() << 20)
-}
-
-fn material_key(pos: &PyrrhicPosition, mirror: bool) -> u64 {
-    let (white, black) = if mirror {
-        (pos.black, pos.white)
-    } else {
-        (pos.white, pos.black)
-    };
-    (u64::from((white & pos.queens).count_ones()))
-        .wrapping_mul(PYRRHIC_PRIME_WQUEEN)
-        .wrapping_add(u64::from((white & pos.rooks).count_ones()).wrapping_mul(PYRRHIC_PRIME_WROOK))
-        .wrapping_add(
-            u64::from((white & pos.bishops).count_ones()).wrapping_mul(PYRRHIC_PRIME_WBISHOP),
-        )
-        .wrapping_add(
-            u64::from((white & pos.knights).count_ones()).wrapping_mul(PYRRHIC_PRIME_WKNIGHT),
-        )
-        .wrapping_add(u64::from((white & pos.pawns).count_ones()).wrapping_mul(PYRRHIC_PRIME_WPAWN))
-        .wrapping_add(
-            u64::from((black & pos.queens).count_ones()).wrapping_mul(PYRRHIC_PRIME_BQUEEN),
-        )
-        .wrapping_add(u64::from((black & pos.rooks).count_ones()).wrapping_mul(PYRRHIC_PRIME_BROOK))
-        .wrapping_add(
-            u64::from((black & pos.bishops).count_ones()).wrapping_mul(PYRRHIC_PRIME_BBISHOP),
-        )
-        .wrapping_add(
-            u64::from((black & pos.knights).count_ones()).wrapping_mul(PYRRHIC_PRIME_BKNIGHT),
-        )
-        .wrapping_add(u64::from((black & pos.pawns).count_ones()).wrapping_mul(PYRRHIC_PRIME_BPAWN))
 }
 
 pub(crate) fn probe_root_public<E: EngineAdapter>(

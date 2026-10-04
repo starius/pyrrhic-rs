@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     engine_adapter::{Color, EngineAdapter, Piece},
+    table_lookup::Generation,
     table_probe::{probe_dtz_public, probe_root_public, probe_wdl_public},
-    tbprobe::{tb_init, Generation, PyrrhicPosition},
+    tbprobe::PyrrhicPosition,
 };
 
 /// Tablebase error type
@@ -81,8 +82,8 @@ pub struct DtzProbeResult {
 /// Handle to tablebase probing code.
 ///
 /// ## Usage
-/// This struct provides a safe wrapper around the unsafe Pyrrhic API. It can be
-/// safely sent across threads and manages initialization and de-initialization of the tablebases.
+/// Each handle owns an immutable discovery generation with synchronized lazy
+/// table loads. Clones can be sent across threads and retain their generation.
 #[derive(Clone)]
 pub struct TableBases<E: EngineAdapter> {
     handle: Arc<Generation>,
@@ -177,10 +178,11 @@ impl<E: EngineAdapter> TableBases<E> {
     /// Absolute paths with Windows drive letters are accepted.
     ///
     pub fn new<P: AsRef<str>>(path: P) -> Result<Self, TBError> {
-        let handle = Arc::new(Generation::new());
-        if !unsafe { tb_init(handle.as_ref(), path.as_ref()) } {
-            return Err(TBError::InitFailed);
-        }
+        let mut generation = Generation::new();
+        generation
+            .initialize(path.as_ref())
+            .map_err(|_| TBError::InitFailed)?;
+        let handle = Arc::new(generation);
         if handle.max_pieces() == 0 {
             return Err(TBError::BadPath);
         }
@@ -276,8 +278,8 @@ impl<E: EngineAdapter> TableBases<E> {
     /// Probe the Distance-To-Zero (DTZ) tables.
     ///
     /// ## Notes:
-    /// The underlying `probe_root` function is not thread safe. Root probes
-    /// are serialized so shared handles can still select tablebase moves.
+    /// Root probes remain serialized while preserving the existing selection
+    /// and search lifecycle behavior.
     #[allow(clippy::too_many_arguments)]
     pub fn probe_root(
         &self,
@@ -324,7 +326,7 @@ impl<E: EngineAdapter> TableBases<E> {
             num_moves: 0,
         };
         match result {
-            DtzProbeValue::Failed => return Err(TBError::ProbeFailed),
+            DtzProbeValue::Failed => Err(TBError::ProbeFailed),
             DtzProbeValue::Stalemate | DtzProbeValue::Checkmate => Ok(dtz_data),
             DtzProbeValue::DtzResult(_) => {
                 for &packed_move in &packed.moves[..packed.len] {

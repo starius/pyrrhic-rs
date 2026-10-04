@@ -31,10 +31,6 @@ impl<const N: usize> MoveList<N> {
         &self.moves[..self.len]
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
     pub(crate) fn push(&mut self, value: PyrrhicMove) -> Result<(), MoveError> {
         let Some(destination) = self.moves.get_mut(self.len) else {
             return Err(MoveError);

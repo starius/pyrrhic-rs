@@ -73,7 +73,6 @@ pub(crate) struct ParsedPair {
 }
 
 pub(crate) struct ParsedTable {
-    pub(crate) split: bool,
     pub(crate) encodings: Vec<Encoding>,
     pub(crate) pairs: Vec<Option<ParsedPair>>,
     pub(crate) map_ranges: Vec<[Range<usize>; 4]>,
@@ -207,7 +206,6 @@ pub(crate) fn parse_table(
         }
     }
     Ok(ParsedTable {
-        split,
         encodings,
         pairs,
         map_ranges,
@@ -637,7 +635,11 @@ mod tests {
             let parsed =
                 parse_table(&bytes, magic, suffix == "rtbw", description, &factors).unwrap();
             assert_eq!(parsed.encodings[0].size, 31_332);
-            assert_eq!(parsed.split, suffix == "rtbw" && bytes[4] & 1 != 0);
+            let tables = if description.primary_pawns > 0 { 4 } else { 1 };
+            assert_eq!(
+                parsed.encodings.len(),
+                tables * (1 + usize::from(suffix == "rtbw" && bytes[4] & 1 != 0))
+            );
             assert!(parsed.pairs.iter().all(Option::is_some));
         }
     }

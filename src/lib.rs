@@ -20,6 +20,7 @@ pub mod engine_adapter;
 mod storage;
 mod table_decoder;
 mod table_encoder;
+mod table_lookup;
 mod table_moves;
 mod table_parser;
 mod table_position;

@@ -220,6 +220,26 @@ fn unix_path_list_keeps_colon_separator() {
 }
 
 #[test]
+fn path_components_are_bounded_and_embedded_nul_fails() {
+    let dir = std::env::temp_dir().join(format!("pyrrhic-path-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::File::create(dir.join("KQvK.rtbw"))
+        .unwrap()
+        .set_len(80)
+        .unwrap();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let path = format!("{separator}{}{separator}{separator}", dir.display());
+    let tb = TableBases::<CozyChessAdapter>::new(&path).unwrap();
+    assert_eq!(tb.max_pieces(), 3);
+    drop(tb);
+    assert!(matches!(
+        TableBases::<CozyChessAdapter>::new(format!("{}\0", dir.display())),
+        Err(TBError::InitFailed)
+    ));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn test_multithread() {
     let pos = "8/7k/1p6/1P6/7K/8/8/8 w - - 0 1";
     let first_tb = loop {

@@ -1409,6 +1409,7 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     if !pathString.is_null() {
         free(pathString as *mut libc::c_void);
         free(paths as *mut libc::c_void);
+        paths = std::ptr::null_mut();
         let mut i: i32 = 0;
         while i < tbNumPiece {
             free_tb_entry(&mut *pieceEntry.offset(i as isize) as *mut PieceEntry as *mut BaseEntry);
@@ -1431,43 +1432,36 @@ pub(crate) unsafe fn tb_init(path: &str) -> bool {
     if path.is_empty() || path == "<empty>" {
         return true;
     }
-    // pathString = malloc((strlen(p)).wrapping_add(1)) as *mut i8;
-    // strcpy(pathString, p);
+    let Ok(cpath) = CString::new(path) else {
+        return false;
+    };
     pathString = malloc(path.len() + 1) as *mut c_char;
-    let cpath = CString::new(path.as_bytes()).unwrap();
-
-    strcpy(pathString, cpath.as_ptr());
-    numPaths = 0;
-    let mut i_1: i32 = 0;
-    loop {
-        if *pathString.offset(i_1 as isize) as i32 != PATH_SEPARATOR {
-            numPaths += 1;
-        }
-        while *pathString.offset(i_1 as isize) as i32 != 0
-            && *pathString.offset(i_1 as isize) as i32 != PATH_SEPARATOR
-        {
-            i_1 += 1;
-        }
-        if *pathString.offset(i_1 as isize) == 0 {
-            break;
-        }
-        *pathString.offset(i_1 as isize) = 0;
-        i_1 += 1;
+    if pathString.is_null() {
+        return false;
     }
-    paths = malloc((numPaths as usize).wrapping_mul(::core::mem::size_of::<*mut c_char>()))
-        as *mut *mut c_char;
-    let mut i_2: i32 = 0;
-    let mut j: i32 = 0;
-    while i_2 < numPaths {
-        while *pathString.offset(j as isize) == 0 {
-            j += 1;
+    strcpy(pathString, cpath.as_ptr());
+    let mut starts = Vec::new();
+    let mut start = 0;
+    for index in 0..=path.len() {
+        if index == path.len() || *pathString.add(index) as i32 == PATH_SEPARATOR {
+            if index > start {
+                starts.push(start);
+            }
+            *pathString.add(index) = 0;
+            start = index + 1;
         }
-        let fresh12 = paths.offset(i_2 as isize);
-        *fresh12 = pathString.offset(j as isize);
-        while *pathString.offset(j as isize) != 0 {
-            j += 1;
+    }
+    numPaths = starts.len() as i32;
+    if !starts.is_empty() {
+        paths = malloc(starts.len() * ::core::mem::size_of::<*mut c_char>()) as *mut *mut c_char;
+        if paths.is_null() {
+            free(pathString as *mut libc::c_void);
+            pathString = std::ptr::null_mut();
+            return false;
         }
-        i_2 += 1;
+        for (index, start) in starts.into_iter().enumerate() {
+            *paths.add(index) = pathString.add(start);
+        }
     }
     tbNumPawn = 0;
     tbNumPiece = tbNumPawn;

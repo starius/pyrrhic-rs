@@ -2,6 +2,8 @@
 #![doc = include_str!("../README.md")]
 
 pub mod engine_adapter;
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_support;
 #[allow(unsafe_code)]
 mod storage;
 mod table_decoder;

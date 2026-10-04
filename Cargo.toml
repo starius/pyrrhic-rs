@@ -17,6 +17,9 @@ categories = ["game-development"]
 name = "pyrrhic_rs"
 crate-type = ["staticlib", "rlib"]
 
+[features]
+fuzzing = []
+
 [dependencies]
 memmap2 = "0.9.4"
 

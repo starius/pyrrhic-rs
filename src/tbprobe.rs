@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, Once,
+        Mutex,
     },
 };
 
@@ -278,7 +278,6 @@ unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
     u16::from_le(le_u16)
 }
 static TB_MUTEX: Mutex<()> = Mutex::new(());
-static INDICES_INIT: Once = Once::new();
 // Windows drive letters contain ':', so its tablebase path list uses ';'.
 const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -1519,7 +1518,6 @@ unsafe fn free_tb_entry(be: *mut BaseEntry) {
 }
 
 pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
-    INDICES_INIT.call_once(|| unsafe { init_indices() });
     if path.is_empty() || path == "<empty>" {
         return true;
     }
@@ -2027,47 +2025,84 @@ const FILE_TO_FILE: [u8; 8] = [0, 1, 2, 3, 3, 2, 1, 0];
 const WDL_TO_MAP: [i32; 5] = [1, 3, 0, 2, 0];
 const PA_FLAGS: [u8; 5] = [8, 0, 0, 0, 4];
 
-static mut BINOMIAL: [[u64; 64]; 7] = [[0; 64]; 7];
-static mut PAWN_IDX: [[u64; 24]; 6] = [[0; 24]; 6];
-static mut PAWN_FACTOR_FILE: [[u64; 4]; 6] = [[0; 4]; 6];
+struct Indices {
+    binomial: [[u64; 64]; 7],
+    pawn_idx: [[u64; 24]; 6],
+    pawn_factor_file: [[u64; 4]; 6],
+}
 
-unsafe fn init_indices() {
+static INDICES: Indices = generate_indices();
+
+const fn generate_indices() -> Indices {
+    let mut binomial = [[0; 64]; 7];
+    let mut pawn_idx = [[0; 24]; 6];
+    let mut pawn_factor_file = [[0; 4]; 6];
     let mut i = 0;
-    let mut j = 0;
-    let mut k = 0;
-    i = 0;
     while i < 7 {
-        j = 0;
+        let mut j = 0;
         while j < 64 {
-            let mut f = 1;
-            let mut l = 1;
-            k = 0;
-            while k < i {
-                f *= (j - k) as u64;
-                l *= (k + 1) as u64;
-                k += 1;
+            if j >= i {
+                let mut f = 1u64;
+                let mut l = 1u64;
+                let mut k = 0;
+                while k < i {
+                    f *= (j - k) as u64;
+                    l *= (k + 1) as u64;
+                    k += 1;
+                }
+                binomial[i][j] = f / l;
             }
-            BINOMIAL[i as usize][j as usize] = f / l;
             j += 1;
         }
         i += 1;
     }
     i = 0;
     while i < 6 {
-        let mut s: u64 = 0;
-        j = 0;
+        let mut sum = 0u64;
+        let mut j = 0;
         while j < 24 {
-            PAWN_IDX[i as usize][j as usize] = s;
-            s = s.wrapping_add(
-                BINOMIAL[i as usize][PAWN_TWIST[((1 + j % 6) * 8 + j / 6) as usize] as usize],
-            );
+            pawn_idx[i][j] = sum;
+            sum += binomial[i][PAWN_TWIST[(1 + j % 6) * 8 + j / 6] as usize];
             if (j + 1) % 6 == 0 {
-                PAWN_FACTOR_FILE[i as usize][(j / 6) as usize] = s;
-                s = 0;
+                pawn_factor_file[i][j / 6] = sum;
+                sum = 0;
             }
             j += 1;
         }
         i += 1;
+    }
+    Indices {
+        binomial,
+        pawn_idx,
+        pawn_factor_file,
+    }
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::INDICES;
+
+    fn fingerprint<const ROWS: usize, const COLS: usize>(array: &[[u64; COLS]; ROWS]) -> u64 {
+        let mut hash = 0xcbf29ce484222325u64;
+        for row in array {
+            for value in row {
+                for byte in value.to_le_bytes() {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    fn immutable_indices_match_the_frozen_full_arrays() {
+        // Fingerprints cover every entry of the previous runtime arrays.
+        assert_eq!(fingerprint(&INDICES.binomial), 0x1471afc56d4ec979);
+        assert_eq!(fingerprint(&INDICES.pawn_idx), 0x891bbb4aa8a1a815);
+        assert_eq!(fingerprint(&INDICES.pawn_factor_file), 0x7b5d8490b32599d0);
+        assert_eq!(INDICES.binomial[6][63], 67_945_521);
+        assert_eq!(INDICES.pawn_idx[5][23], 610);
+        assert_eq!(INDICES.pawn_factor_file[5][3], 610);
     }
 }
 
@@ -2179,11 +2214,12 @@ pub(crate) unsafe fn encode(
             i_2 += 1;
         }
         k = (*be).c2rust_unnamed.pawns[0] as i32;
-        idx = PAWN_IDX[(k - 1) as usize][FLAP[*p.offset(0) as usize] as usize];
+        idx = INDICES.pawn_idx[(k - 1) as usize][FLAP[*p.offset(0) as usize] as usize];
         let mut i_3: i32 = 1;
         while i_3 < k {
             idx = idx.wrapping_add(
-                BINOMIAL[(k - i_3) as usize][PAWN_TWIST[*p.offset(i_3 as isize) as usize] as usize],
+                INDICES.binomial[(k - i_3) as usize]
+                    [PAWN_TWIST[*p.offset(i_3 as isize) as usize] as usize],
             );
             i_3 += 1;
         }
@@ -2213,7 +2249,9 @@ pub(crate) unsafe fn encode(
                     skips += (sq > *p.offset(j_2 as isize)) as i32;
                     j_2 += 1;
                 }
-                s = s.wrapping_add(BINOMIAL[(i_5 - k + 1) as usize][(sq - skips - 8) as usize]);
+                s = s.wrapping_add(
+                    INDICES.binomial[(i_5 - k + 1) as usize][(sq - skips - 8) as usize],
+                );
                 i_5 += 1;
             }
             idx = idx.wrapping_add(s * (*ei).factor[k as usize]);
@@ -2245,7 +2283,8 @@ pub(crate) unsafe fn encode(
                 skips_0 += (sq_0 > *p.offset(j_4 as isize)) as i32;
                 j_4 += 1;
             }
-            s_0 = s_0.wrapping_add(BINOMIAL[(i_7 - k + 1) as usize][(sq_0 - skips_0) as usize]);
+            s_0 = s_0
+                .wrapping_add(INDICES.binomial[(i_7 - k + 1) as usize][(sq_0 - skips_0) as usize]);
             i_7 += 1;
         }
         idx = idx.wrapping_add(s_0 * (*ei).factor[k as usize]);
@@ -2322,7 +2361,7 @@ unsafe fn init_enc_info(
         if i_1 == order {
             (*ei).factor[0] = f;
             f *= if enc == FILE_ENC as i32 {
-                PAWN_FACTOR_FILE[((*ei).norm[0] as i32 - 1) as usize][t as usize]
+                INDICES.pawn_factor_file[((*ei).norm[0] as i32 - 1) as usize][t as usize]
             } else {
                 (if (*be).c2rust_unnamed.kk_enc as i32 != 0 {
                     462

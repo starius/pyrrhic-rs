@@ -71,7 +71,7 @@ fn test_probe_kpvk() {
             0, // no ep square
             test_board_win.side_to_move() == cozy_chess::Color::White,
         );
-        assert!(wdl_win == Ok(WdlProbeResult::Win));
+        assert_eq!(wdl_win, Ok(WdlProbeResult::Win));
         let dtz_result = tb.probe_root(
             test_board_win.colors(cozy_chess::Color::White).0,
             test_board_win.colors(cozy_chess::Color::Black).0,
@@ -123,7 +123,7 @@ fn test_double_init() {
 }
 
 #[test]
-fn missing_tables_do_not_claim_seven_piece_coverage() {
+fn bad_path_does_not_block_later_initialization() {
     let empty = std::env::temp_dir().join(format!("pyrrhic-empty-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
     let error = match TableBases::<CozyChessAdapter>::new(empty.to_str().unwrap()) {
@@ -135,6 +135,7 @@ fn missing_tables_do_not_claim_seven_piece_coverage() {
     };
     assert_eq!(error, TBError::BadPath);
     std::fs::remove_dir(&empty).unwrap();
+    assert!(TableBases::<CozyChessAdapter>::new(SYZYGY_PATH).is_ok());
 }
 
 #[test]

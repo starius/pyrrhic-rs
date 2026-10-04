@@ -121,6 +121,10 @@ impl<E: EngineAdapter> TableBases<E> {
 
         if init {
             if unsafe { tbprobe::TB_LARGEST == 0 } {
+                // tb_init can succeed even when the path contains no tables.
+                // A later SyzygyPath must be able to initialize again.
+                unsafe { tb_free() };
+                TB_INITIALIZED.store(false, Ordering::SeqCst);
                 Err(TBError::BadPath)
             } else {
                 Ok(Self {

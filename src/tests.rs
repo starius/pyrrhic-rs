@@ -72,6 +72,19 @@ fn test_probe_kpvk() {
             test_board_win.side_to_move() == cozy_chess::Color::White,
         );
         assert_eq!(wdl_win, Ok(WdlProbeResult::Win));
+        let direct_dtz = tb.probe_dtz(
+            test_board_win.colors(cozy_chess::Color::White).0,
+            test_board_win.colors(cozy_chess::Color::Black).0,
+            test_board_win.pieces(Piece::King).0,
+            test_board_win.pieces(Piece::Queen).0,
+            test_board_win.pieces(Piece::Rook).0,
+            test_board_win.pieces(Piece::Bishop).0,
+            test_board_win.pieces(Piece::Knight).0,
+            test_board_win.pieces(Piece::Pawn).0,
+            0,
+            true,
+        );
+        assert_eq!(direct_dtz, Ok(dtz_expected));
         let dtz_result = tb.probe_root(
             test_board_win.colors(cozy_chess::Color::White).0,
             test_board_win.colors(cozy_chess::Color::Black).0,
@@ -87,7 +100,7 @@ fn test_probe_kpvk() {
         );
 
         assert!(match dtz_result.unwrap().root {
-            DtzProbeValue::DtzResult(result) => result.dtz == dtz_expected,
+            DtzProbeValue::DtzResult(result) => i32::from(result.dtz) == dtz_expected,
             _ => false,
         })
     }

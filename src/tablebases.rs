@@ -168,6 +168,30 @@ impl<E: EngineAdapter> TableBases<E> {
         }
     }
 
+    /// Probe signed distance to the next zeroing move from the side to move.
+    /// This does not apply the halfmove clock.
+    #[allow(clippy::too_many_arguments)]
+    pub fn probe_dtz(
+        &self,
+        white: u64,
+        black: u64,
+        kings: u64,
+        queens: u64,
+        rooks: u64,
+        bishops: u64,
+        knights: u64,
+        pawns: u64,
+        ep: u32,
+        turn: bool,
+    ) -> Result<i32, TBError> {
+        unsafe {
+            tbprobe::tb_probe_dtz::<E>(
+                white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+            )
+        }
+        .ok_or(TBError::ProbeFailed)
+    }
+
     /// Probe the Distance-To-Zero (DTZ) tables.
     ///
     /// ## Notes:

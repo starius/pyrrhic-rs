@@ -1027,6 +1027,38 @@ pub(crate) unsafe fn tb_probe_wdl<E: EngineAdapter>(
     }
     (v + 2) as u32
 }
+
+/// Signed DTZ from the side to move, without applying a halfmove clock.
+/// The caller can combine this with its own rule-50 policy.
+pub(crate) unsafe fn tb_probe_dtz<E: EngineAdapter>(
+    white: u64,
+    black: u64,
+    kings: u64,
+    queens: u64,
+    rooks: u64,
+    bishops: u64,
+    knights: u64,
+    pawns: u64,
+    ep: u32,
+    turn: bool,
+) -> Option<i32> {
+    let mut pos = PyrrhicPosition {
+        white,
+        black,
+        kings,
+        queens,
+        rooks,
+        bishops,
+        knights,
+        pawns,
+        rule50: 0,
+        ep: ep as u8,
+        turn,
+    };
+    let mut success = 0;
+    let dtz = probe_dtz::<E>(&mut pos, &mut success);
+    (success != 0).then_some(dtz)
+}
 pub(crate) unsafe fn tb_probe_root<E: EngineAdapter>(
     mut white: u64,
     mut black: u64,

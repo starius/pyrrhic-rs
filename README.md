@@ -6,11 +6,11 @@
 Pyrrhic's original API is unsafe, with potential for memory corruption if used improperly. Therefore `pyrrhic-rs` wraps this unsafe API in the `TableBases` struct, which guards against memory- and thread-unsafe usage of the Pyrrhic API.
 
 
-As `pyrrhic-rs` is designed to be used within an existing engine, the user must implement the `EngineAdapter` trait on a type for the probing code to be able to use the engine's own move generation code. Afterwards, `Tablebases::new()` can be called using this type as a parameter.
+As `pyrrhic-rs` is designed to be used within an existing engine, the user must implement the `EngineAdapter` trait on a type for the probing code to be able to use the engine's own move generation code. Afterwards, `TableBases::new()` can be called using this type as a parameter.
 
 ### Example using `cozy_chess`:
 
-```rust
+```rust,no_run
 use cozy_chess::*;
 use pyrrhic_rs::EngineAdapter;
 
@@ -49,7 +49,7 @@ impl EngineAdapter for CozyChessAdapter {
 }
 
 fn main() {
-    let tb = pyrrhic_rs::TableBases::<CozyChessAdapter>::new("./syzygy/tb345:./syzygy/tb6:./syzygy/tb7").unwrap();
+    let _tb = pyrrhic_rs::TableBases::<CozyChessAdapter>::new("./syzygy").unwrap();
 }
 ```
 

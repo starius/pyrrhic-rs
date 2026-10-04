@@ -38,6 +38,7 @@ pub(crate) enum ParseError {
     Overflow,
     Truncated,
     InvalidAlignment,
+    InvalidFormat,
 }
 
 pub(crate) struct Cursor<'a> {

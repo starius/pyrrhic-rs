@@ -7,6 +7,11 @@ use std::{
     sync::OnceLock,
 };
 
+use crate::{
+    storage::TableBytes,
+    table_parser::{parse_table, Description, PairHeader, ParsedTable},
+};
+
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[repr(i32)]
 enum TableType {
@@ -15,12 +20,7 @@ enum TableType {
 }
 const TB_MIN_FILE_SIZE: u64 = 80;
 extern "C" {
-    fn perror(__s: *const c_char);
-    fn malloc(_: usize) -> *mut libc::c_void;
-    fn free(_: *mut libc::c_void);
     fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: usize) -> *mut libc::c_void;
-    fn memset(_: *mut libc::c_void, _: i32, _: usize) -> *mut libc::c_void;
-    fn strcmp(_: *const c_char, _: *const c_char) -> i32;
 }
 
 pub(crate) const PYRRHIC_PRIME_BPAWN: u64 = 11695583624105689831;
@@ -47,8 +47,6 @@ pub(crate) const PYRRHIC_WQUEEN: u32 = 5;
 #[repr(C)]
 pub(crate) struct BaseEntry {
     pub(crate) key: u64,
-    pub(crate) data: [*mut Mmap; 2],
-    pub(crate) mapping: [u64; 2],
     loaded: [OnceLock<Result<LoadedTable, LoadError>>; 2],
     pub(crate) num: u8,
     pub(crate) symmetric: bool,
@@ -61,8 +59,6 @@ impl BaseEntry {
     fn initialized() -> Self {
         Self {
             key: 0,
-            data: [std::ptr::null_mut(); 2],
-            mapping: [0; 2],
             loaded: std::array::from_fn(|_| OnceLock::new()),
             num: 0,
             symmetric: false,
@@ -131,7 +127,7 @@ pub(crate) struct PairsData {
     pub(crate) idxBits: u8,
     pub(crate) minLen: u8,
     pub(crate) constValue: [u8; 2],
-    pub(crate) base: [u64; 1],
+    pub(crate) base: *const u64,
 }
 
 impl PairsData {
@@ -147,7 +143,7 @@ impl PairsData {
             idxBits: 0,
             minLen: 0,
             constValue: [0; 2],
-            base: [0; 1],
+            base: std::ptr::null(),
         }
     }
 }
@@ -185,17 +181,24 @@ enum LoadedStorage {
 
 struct LoadedTable {
     storage: LoadedStorage,
-    kind: TableType,
+    backing: Option<TableBytes>,
+    parsed: Option<ParsedTable>,
+    pairs: Box<[PairsData]>,
 }
 
 impl LoadedTable {
-    fn new(original: *const BaseEntry, kind: TableType) -> Self {
+    fn new(original: *const BaseEntry) -> Self {
         let storage = if unsafe { (*original).hasPawns } {
             LoadedStorage::Pawn(Box::new(PawnEntry::initialized()))
         } else {
             LoadedStorage::Piece(Box::new(PieceEntry::initialized()))
         };
-        let mut table = Self { storage, kind };
+        let mut table = Self {
+            storage,
+            backing: None,
+            parsed: None,
+            pairs: Vec::new().into_boxed_slice(),
+        };
         let destination = table.entry_ptr_mut();
         unsafe {
             (*destination).key = (*original).key;
@@ -225,19 +228,102 @@ impl LoadedTable {
             LoadedStorage::Pawn(entry) => &raw mut entry.be,
         }
     }
+
+    fn install(
+        &mut self,
+        backing: TableBytes,
+        parsed: ParsedTable,
+        kind: TableType,
+    ) -> Result<(), LoadError> {
+        let bytes = backing.as_slice();
+        let base = bytes.as_ptr();
+        let mut pairs = std::iter::repeat_with(PairsData::initialized)
+            .take(parsed.pairs.len())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        for (index, pair) in parsed.pairs.iter().enumerate() {
+            let pair = pair.as_ref().ok_or(LoadError::MissingOrInvalid)?;
+            let raw = &mut pairs[index];
+            match &pair.header {
+                PairHeader::Constant { value, .. } => {
+                    raw.constValue[0] = *value;
+                }
+                PairHeader::Compressed {
+                    block_size,
+                    index_bits,
+                    min_len,
+                    offsets,
+                    bases,
+                    symbol_lengths,
+                    patterns,
+                    ..
+                } => {
+                    raw.blockSize = *block_size;
+                    raw.idxBits = *index_bits;
+                    raw.minLen = *min_len;
+                    raw.indexTable = unsafe { base.add(pair.index.start) }.cast_mut();
+                    raw.sizeTable = unsafe { base.add(pair.sizes.start) }
+                        .cast::<u16>()
+                        .cast_mut();
+                    raw.data = unsafe { base.add(pair.data.start) }.cast_mut();
+                    raw.offset = offsets.as_ptr().cast_mut();
+                    raw.base = bases.as_ptr();
+                    raw.symLen = symbol_lengths.as_ptr().cast_mut();
+                    raw.symPat = patterns.as_ptr().cast::<u8>().cast_mut();
+                }
+            }
+        }
+
+        let be = self.entry_ptr_mut();
+        unsafe {
+            let first = first_ei(be, kind as i32);
+            for (index, encoding) in parsed.encodings.iter().enumerate() {
+                let info = &mut *first.add(index);
+                info.precomp = &mut pairs[index];
+                info.pieces = encoding.pieces;
+                info.norm = encoding.norm;
+                info.factor = encoding.factor;
+            }
+            if kind == TableType::Dtz {
+                let map = base
+                    .add(parsed.map_origin)
+                    .cast_mut()
+                    .cast::<libc::c_void>();
+                if (*be).hasPawns {
+                    let entry = &mut *(be as *mut PawnEntry);
+                    entry.dtzMap = map;
+                    for table in 0..4 {
+                        entry.dtzFlags[table] = parsed.pairs[table]
+                            .as_ref()
+                            .ok_or(LoadError::MissingOrInvalid)?
+                            .header
+                            .flags();
+                        entry.dtzMapIdx[table] = parsed.map_indices[table];
+                    }
+                } else {
+                    let entry = &mut *(be as *mut PieceEntry);
+                    entry.dtzMap = map;
+                    entry.dtzFlags = parsed.pairs[0]
+                        .as_ref()
+                        .ok_or(LoadError::MissingOrInvalid)?
+                        .header
+                        .flags();
+                    entry.dtzMapIdx = parsed.map_indices[0];
+                }
+            }
+        }
+        self.pairs = pairs;
+        self.parsed = Some(parsed);
+        self.backing = Some(backing);
+        Ok(())
+    }
 }
 
 // Each table is fully constructed before OnceLock publishes it. Its raw
-// pointers target only the immutable mapping and metadata owned here. This
-// temporary bridge is removed when the checked parser owns its metadata.
+// pointers target only the immutable mapping and owned metadata above. This
+// temporary bridge is removed when the decoder and encoder become safe.
 unsafe impl Send for LoadedTable {}
 unsafe impl Sync for LoadedTable {}
-
-impl Drop for LoadedTable {
-    fn drop(&mut self) {
-        unsafe { free_table_type(self.entry_ptr(), self.kind as i32) };
-    }
-}
 
 #[derive(Copy, Clone)]
 enum EntryIndex {
@@ -318,8 +404,6 @@ pub(crate) fn poplsb(x: &mut u64) -> u64 {
     lsb as u64
 }
 
-use memmap2::{Mmap, MmapOptions};
-
 use crate::engine_adapter::{Color, EngineAdapter};
 
 pub(crate) fn popcount(x: u64) -> u64 {
@@ -330,16 +414,6 @@ pub(crate) fn getlsb(x: u64) -> u64 {
     x.trailing_zeros() as u64
 }
 
-#[inline]
-unsafe fn read_le_u32(mut p: *mut libc::c_void) -> u32 {
-    let le_u32 = (p as *mut u32).read_unaligned();
-    u32::from_le(le_u32)
-}
-#[inline]
-unsafe fn read_le_u16(mut p: *mut libc::c_void) -> u16 {
-    let le_u16 = (p as *mut u16).read_unaligned();
-    u16::from_le(le_u16)
-}
 // Windows drive letters contain ':', so its tablebase path list uses ';'.
 const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -441,33 +515,6 @@ unsafe fn open_tb(
     ))
 }
 fn close_tb(_file_handle: File) {}
-unsafe fn map_file(file: &File, mapping: *mut u64) -> *mut Mmap {
-    let Ok(metadata) = file.metadata() else {
-        return std::ptr::null_mut();
-    };
-    // Every table in the pinned 3-6 piece manifests is at least 80 bytes
-    // and has a size congruent to 16 modulo 64. Reject impossible envelopes
-    // before the translated decoder reads fields past the five-byte magic
-    // header. This does not validate the compressed payload.
-    if metadata.len() < TB_MIN_FILE_SIZE || metadata.len() % 64 != 16 {
-        return std::ptr::null_mut();
-    }
-    let Ok(mmap) = MmapOptions::new().map(file) else {
-        return std::ptr::null_mut();
-    };
-    if mmap.len() as u64 != metadata.len() {
-        return std::ptr::null_mut();
-    }
-    *mapping = metadata.len();
-    Box::into_raw(Box::new(mmap))
-}
-unsafe fn unmap_file(data: *mut Mmap, _size: u64) {
-    if data.is_null() {
-        return;
-    }
-    let mmap_ptr = Box::from_raw(data);
-    drop(mmap_ptr);
-}
 
 const TB_SUFFIX: [*const c_char; 2] = [
     b".rtbw\0" as *const u8 as *const c_char,
@@ -1413,22 +1460,6 @@ unsafe fn test_tb(owner: &Generation, mut str: *const c_char, mut suffix: *const
         -1
     }
 }
-unsafe fn map_tb(
-    owner: &Generation,
-    mut name: *const c_char,
-    mut suffix: *const c_char,
-    mut mapping: *mut u64,
-) -> *mut Mmap {
-    let mut file = open_tb(owner, name, suffix);
-    if file.is_err() {
-        return std::ptr::null_mut();
-    }
-    let file = file.unwrap();
-    let mut data = map_file(&file, mapping);
-
-    close_tb(file);
-    data
-}
 unsafe fn add_to_hash(owner: &Generation, entry: EntryIndex, key: u64) {
     let mut idx: i32 = 0;
     idx = (key >> (64 - 12)) as i32;
@@ -1547,22 +1578,6 @@ pub(crate) unsafe fn first_ei(be: *mut BaseEntry, type_0: i32) -> *mut EncInfo {
             .offset((if type_0 == WDL as i32 { 0 } else { 2 }) as isize)
     }
 }
-unsafe fn free_table_type(be: *mut BaseEntry, type_0: i32) {
-    if (*be).data[type_0 as usize].is_null() {
-        return;
-    }
-    unmap_file((*be).data[type_0 as usize], (*be).mapping[type_0 as usize]);
-    let num = num_tables(be);
-    let ei = first_ei(be, type_0);
-    for t in 0..num {
-        free((*ei.offset(t as isize)).precomp as *mut libc::c_void);
-        if type_0 != DTZ as i32 {
-            free((*ei.offset((num + t) as isize)).precomp as *mut libc::c_void);
-        }
-    }
-    (*be).data[type_0 as usize] = std::ptr::null_mut();
-}
-
 pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
     if path.is_empty() || path == "<empty>" {
         return true;
@@ -2062,13 +2077,13 @@ const FILE_TO_FILE: [u8; 8] = [0, 1, 2, 3, 3, 2, 1, 0];
 const WDL_TO_MAP: [i32; 5] = [1, 3, 0, 2, 0];
 const PA_FLAGS: [u8; 5] = [8, 0, 0, 0, 4];
 
-struct Indices {
+pub(crate) struct Indices {
     binomial: [[u64; 64]; 7],
     pawn_idx: [[u64; 24]; 6],
-    pawn_factor_file: [[u64; 4]; 6],
+    pub(crate) pawn_factor_file: [[u64; 4]; 6],
 }
 
-static INDICES: Indices = generate_indices();
+pub(crate) static INDICES: Indices = generate_indices();
 
 const fn generate_indices() -> Indices {
     let mut binomial = [[0; 64]; 7];
@@ -2335,372 +2350,6 @@ unsafe fn encode_piece(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseE
 unsafe fn encode_pawn_f(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseEntry) -> u64 {
     encode(p, ei, be, FILE_ENC as i32)
 }
-unsafe fn subfactor(mut k: u64, mut n: u64) -> u64 {
-    let mut f: u64 = n;
-    let mut l: u64 = 1;
-    let mut i: u64 = 1;
-    while i < k {
-        f *= n.wrapping_sub(i);
-        l *= i.wrapping_add(1);
-        i = i.wrapping_add(1);
-    }
-    f / l
-}
-unsafe fn init_enc_info(
-    mut ei: *mut EncInfo,
-    mut be: *mut BaseEntry,
-    mut tb: *mut u8,
-    mut shift: i32,
-    mut t: i32,
-    enc: i32,
-) -> u64 {
-    let mut morePawns: bool = enc != PIECE_ENC as i32 && (*be).c2rust_unnamed.pawns[1] as i32 > 0;
-    let mut i: i32 = 0;
-    while i < (*be).num as i32 {
-        (*ei).pieces[i as usize] =
-            (*tb.offset((i + 1 + morePawns as i32) as isize) as i32 >> shift & 0xf) as u8;
-        (*ei).norm[i as usize] = 0;
-        i += 1;
-    }
-    let mut order: i32 = *tb.offset(0) as i32 >> shift & 0xf;
-    let mut order2: i32 = if morePawns as i32 != 0 {
-        *tb.offset(1) as i32 >> shift & 0xf
-    } else {
-        0xf
-    };
-    (*ei).norm[0] = (if enc != PIECE_ENC as i32 {
-        (*be).c2rust_unnamed.pawns[0] as i32
-    } else if (*be).c2rust_unnamed.kk_enc as i32 != 0 {
-        2
-    } else {
-        3
-    }) as u8;
-    let mut k: i32 = (*ei).norm[0] as i32;
-    if morePawns {
-        (*ei).norm[k as usize] = (*be).c2rust_unnamed.pawns[1];
-        k += (*ei).norm[k as usize] as i32;
-    }
-    let mut i_0: i32 = k;
-    while i_0 < (*be).num as i32 {
-        let mut j: i32 = i_0;
-        while j < (*be).num as i32
-            && (*ei).pieces[j as usize] as i32 == (*ei).pieces[i_0 as usize] as i32
-        {
-            (*ei).norm[i_0 as usize] = ((*ei).norm[i_0 as usize]).wrapping_add(1);
-            j += 1;
-        }
-        i_0 += (*ei).norm[i_0 as usize] as i32;
-    }
-    let mut n: i32 = 64 - k;
-    let mut f: u64 = 1;
-    let mut i_1: i32 = 0;
-    while k < (*be).num as i32 || i_1 == order || i_1 == order2 {
-        if i_1 == order {
-            (*ei).factor[0] = f;
-            f *= if enc == FILE_ENC as i32 {
-                INDICES.pawn_factor_file[((*ei).norm[0] as i32 - 1) as usize][t as usize]
-            } else {
-                (if (*be).c2rust_unnamed.kk_enc as i32 != 0 {
-                    462
-                } else {
-                    31332
-                }) as u64
-            };
-        } else if i_1 == order2 {
-            (*ei).factor[(*ei).norm[0] as usize] = f;
-            f *= subfactor(
-                (*ei).norm[(*ei).norm[0] as usize] as u64,
-                (48 - (*ei).norm[0] as i32) as u64,
-            );
-        } else {
-            (*ei).factor[k as usize] = f;
-            f *= subfactor((*ei).norm[k as usize] as u64, n as u64);
-            n -= (*ei).norm[k as usize] as i32;
-            k += (*ei).norm[k as usize] as i32;
-        }
-        i_1 += 1;
-    }
-    f
-}
-unsafe fn calc_symLen(mut d: *mut PairsData, mut s: u32, mut tmp: *mut i8) {
-    let mut w: *mut u8 = ((*d).symPat).offset((3 * s) as isize);
-    let mut s2: u32 = ((*w.offset(2) as i32) << 4 | *w.offset(1) as i32 >> 4) as u32;
-    if s2 == 0xfff {
-        *((*d).symLen).offset(s as isize) = 0;
-    } else {
-        let mut s1: u32 = ((*w.offset(1) as i32 & 0xf) << 8 | *w.offset(0) as i32) as u32;
-        if *tmp.offset(s1 as isize) == 0 {
-            calc_symLen(d, s1, tmp);
-        }
-        if *tmp.offset(s2 as isize) == 0 {
-            calc_symLen(d, s2, tmp);
-        }
-        *((*d).symLen).offset(s as isize) = (*((*d).symLen).offset(s1 as isize) as i32
-            + *((*d).symLen).offset(s2 as isize) as i32
-            + 1) as u8;
-    }
-    *tmp.offset(s as isize) = 1;
-}
-unsafe fn setup_pairs(
-    mut ptr: *mut *mut u8,
-    mut tb_size: u64,
-    mut size: *mut u64,
-    mut flags: *mut u8,
-    mut type_0: i32,
-) -> *mut PairsData {
-    let mut d: *mut PairsData = std::ptr::null_mut::<PairsData>();
-    let mut data: *mut u8 = *ptr;
-    *flags = *data.offset(0);
-    if *data.offset(0) as i32 & 0x80 != 0 {
-        d = malloc(::core::mem::size_of::<PairsData>()) as *mut PairsData;
-        assert!(!d.is_null(), "Syzygy metadata allocation failed");
-        std::ptr::write(d, PairsData::initialized());
-        (*d).idxBits = 0;
-        (*d).constValue[0] = (if type_0 == WDL as i32 {
-            *data.offset(1) as i32
-        } else {
-            0
-        }) as u8;
-        (*d).constValue[1] = 0;
-        *ptr = data.offset(2);
-        let fresh13 = &mut (*size.offset(2));
-        *fresh13 = 0;
-        let fresh14 = &mut (*size.offset(1));
-        *fresh14 = *fresh13;
-        *size.offset(0) = *fresh14;
-        return d;
-    }
-    let mut blockSize: u8 = *data.offset(1);
-    let mut idxBits: u8 = *data.offset(2);
-    let mut realNumBlocks: u32 = read_le_u32(data.offset(4) as *mut libc::c_void);
-    let mut numBlocks: u32 = realNumBlocks.wrapping_add(*data.offset(3) as u32);
-    let mut maxLen: i32 = *data.offset(8) as i32;
-    let mut minLen: i32 = *data.offset(9) as i32;
-    let mut h: i32 = maxLen - minLen + 1;
-    let mut numSyms: u32 =
-        read_le_u16(data.offset(10).offset((2 * h) as isize) as *mut libc::c_void) as u32;
-    d = malloc(
-        ::core::mem::size_of::<PairsData>()
-            .wrapping_add((h as usize).wrapping_mul(::core::mem::size_of::<u64>()))
-            .wrapping_add(numSyms as usize),
-    ) as *mut PairsData;
-    assert!(!d.is_null(), "Syzygy metadata allocation failed");
-    std::ptr::write(d, PairsData::initialized());
-    (*d).blockSize = blockSize;
-    (*d).idxBits = idxBits;
-    (*d).offset = data.offset(10) as *mut u16;
-    (*d).symLen = (d as *mut u8)
-        .offset(::core::mem::size_of::<PairsData>() as u64 as isize)
-        .offset((h as u64).wrapping_mul(::core::mem::size_of::<u64>() as u64) as isize);
-    (*d).symPat = data.offset((12 + 2 * h) as isize);
-    (*d).minLen = minLen as u8;
-    *ptr = data.offset(
-        ((12 + 2 * h) as u32)
-            .wrapping_add(3 * numSyms)
-            .wrapping_add(numSyms & 1) as isize,
-    );
-    let mut num_indices: u64 = (tb_size)
-        .wrapping_add((1) << idxBits as i32)
-        .wrapping_sub(1)
-        >> idxBits as i32;
-    *size.offset(0) = (6u64).wrapping_mul(num_indices);
-    *size.offset(1) = (2u64).wrapping_mul(numBlocks as u64);
-    *size.offset(2) = (realNumBlocks as u64) << blockSize as i32;
-    assert!(numSyms < 4096);
-    let mut tmp: [i8; 4096] = [0; 4096];
-    memset(tmp.as_mut_ptr() as *mut libc::c_void, 0, numSyms as usize);
-    let mut s: u32 = 0;
-    while s < numSyms {
-        if tmp[s as usize] == 0 {
-            calc_symLen(d, s, tmp.as_mut_ptr());
-        }
-        s = s.wrapping_add(1);
-    }
-    let base = (&raw mut (*d).base).cast::<u64>();
-    *base.offset((h - 1) as isize) = 0;
-    let mut i: i32 = h - 2;
-    while i >= 0 {
-        *base.offset(i as isize) = (*base.offset((i + 1) as isize))
-            .wrapping_add(read_le_u16(
-                ((*d).offset).offset(i as isize) as *mut u8 as *mut libc::c_void
-            ) as u64)
-            .wrapping_sub(read_le_u16(
-                ((*d).offset).offset(i as isize).offset(1) as *mut u8 as *mut libc::c_void
-            ) as u64)
-            / 2;
-        i -= 1;
-    }
-    let mut i_0: i32 = 0;
-    while i_0 < h {
-        *base.offset(i_0 as isize) <<= 64 - (minLen + i_0);
-        i_0 += 1;
-    }
-    d
-}
-unsafe fn init_table(
-    owner: &Generation,
-    be: *mut BaseEntry,
-    str: *const c_char,
-    type_0: i32,
-) -> bool {
-    let mut mmap = map_tb(
-        owner,
-        str,
-        TB_SUFFIX[type_0 as usize],
-        (&raw mut (*be).mapping)
-            .cast::<u64>()
-            .offset(type_0 as isize),
-    );
-    if mmap.is_null() {
-        return false;
-    }
-
-    let mut data = (*mmap).as_ptr() as *mut u8;
-
-    if ((&*mmap).len() as u64) < TB_MIN_FILE_SIZE {
-        unmap_file(mmap, (*be).mapping[type_0 as usize]);
-        return false;
-    }
-    if read_le_u32(data as *mut libc::c_void) != TB_MAGIC[type_0 as usize] {
-        eprintln!("Corrupted table");
-        unmap_file(mmap, (*be).mapping[type_0 as usize]);
-        return false;
-    }
-
-    (*be).data[type_0 as usize] = mmap;
-    let split: bool = type_0 != DTZ as i32 && *data.offset(4) as i32 & 0x1 != 0;
-    data = data.offset(5);
-    let mut tb_size = [[0; 2]; 6];
-    let num = num_tables(be);
-    let ei = first_ei(be, type_0);
-    let enc = if !(*be).hasPawns {
-        PIECE_ENC as i32
-    } else {
-        FILE_ENC as i32
-    };
-    for t in 0..num {
-        tb_size[t as usize][0] = init_enc_info(&mut *ei.offset(t as isize), be, data, 0, t, enc);
-        if split {
-            tb_size[t as usize][1] =
-                init_enc_info(&mut *ei.offset((num + t) as isize), be, data, 4, t, enc);
-        }
-        data = data.offset(
-            ((*be).num as i32
-                + 1
-                + ((*be).hasPawns as i32 != 0 && (*be).c2rust_unnamed.pawns[1] as i32 != 0) as i32)
-                as isize,
-        );
-    }
-    data = data.offset((data as u64 & 1) as isize);
-    let mut size = [[[0; 3]; 2]; 6];
-    for t_0 in 0..num {
-        let mut flags: u8 = 0;
-        (*ei.offset(t_0 as isize)).precomp = setup_pairs(
-            &mut data,
-            tb_size[t_0 as usize][0],
-            (size[t_0 as usize][0]).as_mut_ptr(),
-            &mut flags,
-            type_0,
-        );
-        if type_0 == DTZ as i32 {
-            if !(*be).hasPawns {
-                (*(be as *mut PieceEntry)).dtzFlags = flags;
-            } else {
-                (*(be as *mut PawnEntry)).dtzFlags[t_0 as usize] = flags;
-            }
-        }
-        if split {
-            (*ei.offset((num + t_0) as isize)).precomp = setup_pairs(
-                &mut data,
-                tb_size[t_0 as usize][1],
-                (size[t_0 as usize][1]).as_mut_ptr(),
-                &mut flags,
-                type_0,
-            );
-        } else if type_0 != DTZ as i32 {
-            (*ei.offset((num + t_0) as isize)).precomp = std::ptr::null_mut::<PairsData>();
-        }
-    }
-    if type_0 == DTZ as i32 {
-        let mut map_0 = data as *mut libc::c_void;
-        if (*be).hasPawns as i32 != 0 {
-            (*(be as *mut PawnEntry)).dtzMap = map_0
-        } else {
-            (*(be as *mut PieceEntry)).dtzMap = map_0
-        };
-        let mut mapIdx_0 = if (*be).hasPawns as i32 != 0 {
-            &mut *((*(be as *mut PawnEntry)).dtzMapIdx).as_mut_ptr().offset(0) as *mut [u16; 4]
-        } else {
-            &mut (*(be as *mut PieceEntry)).dtzMapIdx
-        };
-        let mut flags_0: *mut u8 = if (*be).hasPawns as i32 != 0 {
-            &mut *((*(be as *mut PawnEntry)).dtzFlags).as_mut_ptr().offset(0) as *mut u8
-        } else {
-            &mut (*(be as *mut PieceEntry)).dtzFlags
-        };
-        let mut t_2: i32 = 0;
-        while t_2 < num {
-            if *flags_0.offset(t_2 as isize) as i32 & 2 != 0 {
-                if *flags_0.offset(t_2 as isize) as i32 & 16 == 0 {
-                    let mut i_1: i32 = 0;
-                    while i_1 < 4 {
-                        (*mapIdx_0.offset(t_2 as isize))[i_1 as usize] =
-                            data.offset(1).offset_from(map_0 as *mut u8) as u16;
-                        data = data.offset((1 + *data.offset(0) as i32) as isize);
-                        i_1 += 1;
-                    }
-                } else {
-                    data = data.offset((data as u64 & 0x1) as isize);
-                    let mut i_2: i32 = 0;
-                    while i_2 < 4 {
-                        (*mapIdx_0.offset(t_2 as isize))[i_2 as usize] =
-                            (data as *mut u16).offset(1).offset_from(map_0 as *mut u16) as u16;
-                        data = data.offset(
-                            (2 + 2 * read_le_u16(data as *mut libc::c_void) as i32) as isize,
-                        );
-                        i_2 += 1;
-                    }
-                }
-            }
-            t_2 += 1;
-        }
-        data = data.offset((data as u64 & 0x1) as isize);
-    }
-    let mut t_3: i32 = 0;
-    while t_3 < num {
-        let fresh20 = &mut (*(*ei.offset(t_3 as isize)).precomp).indexTable;
-        *fresh20 = data;
-        data = data.offset(size[t_3 as usize][0][0] as isize);
-        if split {
-            (*(*ei.offset((num + t_3) as isize)).precomp).indexTable = data;
-            data = data.offset(size[t_3 as usize][1][0] as isize);
-        }
-        t_3 += 1;
-    }
-    let mut t_4: i32 = 0;
-    while t_4 < num {
-        (*(*ei.offset(t_4 as isize)).precomp).sizeTable = data as *mut u16;
-        data = data.offset(size[t_4 as usize][0][1] as isize);
-        if split {
-            (*(*ei.offset((num + t_4) as isize)).precomp).sizeTable = data as *mut u16;
-            data = data.offset(size[t_4 as usize][1][1] as isize);
-        }
-        t_4 += 1;
-    }
-    let mut t_5: i32 = 0;
-    while t_5 < num {
-        data = ((data as u64).wrapping_add(0x3f) & !(0x3f)) as *mut u8;
-        (*(*ei.offset(t_5 as isize)).precomp).data = data;
-        data = data.offset(size[t_5 as usize][0][2] as isize);
-        if split {
-            data = ((data as u64).wrapping_add(0x3f) & !(0x3f)) as *mut u8;
-            (*(*ei.offset((num + t_5) as isize)).precomp).data = data;
-            data = data.offset(size[t_5 as usize][1][2] as isize);
-        }
-        t_5 += 1;
-    }
-    true
-}
 unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *const u8 {
     if (*d).idxBits == 0 {
         return (&raw const (*d).constValue).cast::<u8>();
@@ -2734,7 +2383,7 @@ unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *const u8 {
         ((*d).data).offset(((block as u64) << (*d).blockSize as i32) as isize) as *mut u32;
     let mut m: i32 = (*d).minLen as i32;
     let mut offset: *const u16 = (*d).offset;
-    let base: *const u64 = (&raw const (*d).base).cast::<u64>();
+    let base: *const u64 = (*d).base;
     let mut symLen: *mut u8 = (*d).symLen;
     let mut sym: u32 = 0;
     let mut bitCnt: u32 = 0;
@@ -2813,15 +2462,45 @@ fn load_table(
     key: u64,
     kind: TableType,
 ) -> Result<LoadedTable, LoadError> {
-    let mut table = LoadedTable::new(original, kind);
     let mut name = [0 as c_char; 16];
     unsafe {
         prt_str(pos, name.as_mut_ptr(), ((*original).key != key) as i32);
-        if init_table(owner, table.entry_ptr_mut(), name.as_ptr(), kind as i32) {
-            Ok(table)
-        } else {
-            Err(LoadError::MissingOrInvalid)
+        let file = open_tb(owner, name.as_ptr(), TB_SUFFIX[kind as usize])
+            .map_err(|_| LoadError::MissingOrInvalid)?;
+        let size = file
+            .metadata()
+            .map_err(|_| LoadError::MissingOrInvalid)?
+            .len();
+        if size < TB_MIN_FILE_SIZE || size & 63 != 16 {
+            return Err(LoadError::MissingOrInvalid);
         }
+        let backing = TableBytes::map(&file).map_err(|_| LoadError::MissingOrInvalid)?;
+        if backing.as_slice().len() as u64 != size {
+            return Err(LoadError::MissingOrInvalid);
+        }
+        let (primary_pawns, secondary_pawns, king_pair) = if (*original).hasPawns {
+            let pawns = (*original).c2rust_unnamed.pawns;
+            (usize::from(pawns[0]), usize::from(pawns[1]), false)
+        } else {
+            (0, 0, (*original).c2rust_unnamed.kk_enc)
+        };
+        let description = Description {
+            pieces: usize::from((*original).num),
+            primary_pawns,
+            secondary_pawns,
+            king_pair,
+        };
+        let parsed = parse_table(
+            backing.as_slice(),
+            TB_MAGIC[kind as usize],
+            kind == TableType::Wdl,
+            description,
+            &INDICES.pawn_factor_file,
+        )
+        .map_err(|_| LoadError::MissingOrInvalid)?;
+        let mut table = LoadedTable::new(original);
+        table.install(backing, parsed, kind)?;
+        Ok(table)
     }
 }
 
@@ -3369,37 +3048,16 @@ mod initialization_tests {
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
-                assert!(entry.be.data.iter().all(|data| data.is_null()));
+                assert!(entry.be.loaded.iter().all(|cell| cell.get().is_none()));
             }
             for entry in &state.pawn_entry {
                 assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
-                assert!(entry.be.data.iter().all(|data| data.is_null()));
+                assert!(entry.be.loaded.iter().all(|cell| cell.get().is_none()));
             }
         }
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn constant_pair_header_is_initialized_before_later_field_borrows() {
-        let mut bytes = [0x80u8, 4];
-        let mut cursor = bytes.as_mut_ptr();
-        let mut sizes = [0u64; 3];
-        let mut flags = 0;
-        let pairs =
-            unsafe { setup_pairs(&mut cursor, 1, sizes.as_mut_ptr(), &mut flags, WDL as i32) };
-        assert!(!pairs.is_null());
-        let pairs_ref = unsafe { &*pairs };
-        assert_eq!(pairs_ref.constValue, [4, 0]);
-        assert!(pairs_ref.indexTable.is_null());
-        assert!(pairs_ref.sizeTable.is_null());
-        assert!(pairs_ref.data.is_null());
-        assert!(pairs_ref.offset.is_null());
-        assert!(pairs_ref.symLen.is_null());
-        assert!(pairs_ref.symPat.is_null());
-        assert_eq!(pairs_ref.base, [0]);
-        unsafe { free(pairs.cast()) };
     }
 }

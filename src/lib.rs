@@ -18,6 +18,7 @@
 extern crate libc;
 pub mod engine_adapter;
 mod storage;
+mod table_parser;
 mod tbprobe;
 
 pub mod tablebases;

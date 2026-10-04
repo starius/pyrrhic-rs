@@ -10,6 +10,7 @@ use std::{
 use crate::{
     storage::TableBytes,
     table_decoder::decode_pair,
+    table_encoder::{encode_squares, fill_squares, leading_pawn},
     table_parser::{parse_table, Description, ParsedTable},
 };
 
@@ -76,45 +77,24 @@ pub(crate) union C2RustUnnamed_0 {
 #[repr(C)]
 pub(crate) struct PieceEntry {
     pub(crate) be: BaseEntry,
-    pub(crate) ei: [EncInfo; 3],
 }
 
 impl PieceEntry {
     fn initialized() -> Self {
         Self {
             be: BaseEntry::initialized(),
-            ei: [EncInfo::initialized(); 3],
-        }
-    }
-}
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub(crate) struct EncInfo {
-    pub(crate) factor: [u64; 7],
-    pub(crate) pieces: [u8; 7],
-    pub(crate) norm: [u8; 7],
-}
-
-impl EncInfo {
-    fn initialized() -> Self {
-        Self {
-            factor: [0; 7],
-            pieces: [0; 7],
-            norm: [0; 7],
         }
     }
 }
 #[repr(C)]
 pub(crate) struct PawnEntry {
     pub(crate) be: BaseEntry,
-    pub(crate) ei: [EncInfo; 12],
 }
 
 impl PawnEntry {
     fn initialized() -> Self {
         Self {
             be: BaseEntry::initialized(),
-            ei: [EncInfo::initialized(); 12],
         }
     }
 }
@@ -133,10 +113,11 @@ struct LoadedTable {
     storage: LoadedStorage,
     backing: Option<TableBytes>,
     parsed: Option<ParsedTable>,
+    description: Description,
 }
 
 impl LoadedTable {
-    fn new(original: *const BaseEntry) -> Self {
+    fn new(original: *const BaseEntry, description: Description) -> Self {
         let storage = if unsafe { (*original).hasPawns } {
             LoadedStorage::Pawn(Box::new(PawnEntry::initialized()))
         } else {
@@ -146,6 +127,7 @@ impl LoadedTable {
             storage,
             backing: None,
             parsed: None,
+            description,
         };
         let destination = table.entry_ptr_mut();
         unsafe {
@@ -177,25 +159,9 @@ impl LoadedTable {
         }
     }
 
-    fn install(
-        &mut self,
-        backing: TableBytes,
-        parsed: ParsedTable,
-        kind: TableType,
-    ) -> Result<(), LoadError> {
-        let be = self.entry_ptr_mut();
-        unsafe {
-            let first = first_ei(be, kind as i32);
-            for (index, encoding) in parsed.encodings.iter().enumerate() {
-                let info = &mut *first.add(index);
-                info.pieces = encoding.pieces;
-                info.norm = encoding.norm;
-                info.factor = encoding.factor;
-            }
-        }
+    fn install(&mut self, backing: TableBytes, parsed: ParsedTable) {
         self.parsed = Some(parsed);
         self.backing = Some(backing);
-        Ok(())
     }
 }
 
@@ -1437,27 +1403,6 @@ unsafe fn init_tb(owner: &Generation, mut str: *const c_char) {
     }
 }
 
-pub(crate) unsafe fn num_tables(be: *mut BaseEntry) -> i32 {
-    if (*be).hasPawns as i32 != 0 {
-        4
-    } else {
-        1
-    }
-}
-
-pub(crate) unsafe fn first_ei(be: *mut BaseEntry, type_0: i32) -> *mut EncInfo {
-    // WDL and DTZ probes may read this array concurrently. Keep the pointer
-    // raw: taking &mut to the whole array would claim exclusive access.
-    if (*be).hasPawns as i32 != 0 {
-        (&raw mut (*(be as *mut PawnEntry)).ei)
-            .cast::<EncInfo>()
-            .offset((if type_0 == WDL as i32 { 0 } else { 8 }) as isize)
-    } else {
-        (&raw mut (*(be as *mut PieceEntry)).ei)
-            .cast::<EncInfo>()
-            .offset((if type_0 == WDL as i32 { 0 } else { 2 }) as isize)
-    }
-}
 pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
     if path.is_empty() || path == "<empty>" {
         return true;
@@ -1766,7 +1711,7 @@ pub(crate) unsafe fn tb_init(owner: &Generation, path: &str) -> bool {
 }
 
 #[rustfmt::skip]
-const OFF_DIAG: [i8; 64] = [
+pub(crate) const OFF_DIAG: [i8; 64] = [
     0, -1, -1, -1, -1, -1, -1, -1,
     1,  0, -1, -1, -1, -1, -1, -1,
     1,  1,  0, -1, -1, -1, -1, -1,
@@ -1778,7 +1723,7 @@ const OFF_DIAG: [i8; 64] = [
 ];
 
 #[rustfmt::skip]
-const TRIANGLE: [u8; 64] = [
+pub(crate) const TRIANGLE: [u8; 64] = [
     6, 0, 1, 2, 2, 1, 0, 6,
     0, 7, 3, 4, 4, 3, 7, 0,
     1, 3, 8, 5, 5, 8, 3, 1,
@@ -1790,7 +1735,7 @@ const TRIANGLE: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const FLIP_DIAG: [u8; 64] = [
+pub(crate) const FLIP_DIAG: [u8; 64] = [
     0,  8, 16, 24, 32, 40, 48, 56,
     1,  9, 17, 25, 33, 41, 49, 57,
     2, 10, 18, 26, 34, 42, 50, 58,
@@ -1802,7 +1747,7 @@ const FLIP_DIAG: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const LOWER: [u8; 64] = [
+pub(crate) const LOWER: [u8; 64] = [
     28,  0,  1,  2,  3,  4,  5,  6,
      0, 29,  7,  8,  9, 10, 11, 12,
      1,  7, 30, 13, 14, 15, 16, 17,
@@ -1814,7 +1759,7 @@ const LOWER: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const DIAG: [u8; 64] = [
+pub(crate) const DIAG: [u8; 64] = [
      0,  0,  0,  0,  0,  0,  0,  8,
      0,  1,  0,  0,  0,  0,  9,  0,
      0,  0,  2,  0,  0, 10,  0,  0,
@@ -1826,7 +1771,7 @@ const DIAG: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const FLAP: [u8; 64] = [
+pub(crate) const FLAP: [u8; 64] = [
         0,  0,  0,  0,  0,  0,  0, 0,
         0,  6, 12, 18, 18, 12,  6, 0,
         1,  7, 13, 19, 19, 13,  7, 1,
@@ -1838,7 +1783,7 @@ const FLAP: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const PAWN_TWIST: [u8; 64] = [
+pub(crate) const PAWN_TWIST: [u8; 64] = [
          0,  0,  0,  0,  0,  0,  0,  0,
         47, 35, 23, 11, 10, 22, 34, 46,
         45, 33, 21,  9,  8, 20, 32, 44,
@@ -1850,7 +1795,7 @@ const PAWN_TWIST: [u8; 64] = [
 ];
 
 #[rustfmt::skip]
-const KK_IDX: [[i16; 64]; 10] = [
+pub(crate) const KK_IDX: [[i16; 64]; 10] = [
     [
         -1, -1, -1,  0,  1,  2,  3,  4,
         -1, -1, -1,  5,  6,  7,  8,  9,
@@ -1953,13 +1898,13 @@ const KK_IDX: [[i16; 64]; 10] = [
     ],
 ];
 
-const FILE_TO_FILE: [u8; 8] = [0, 1, 2, 3, 3, 2, 1, 0];
+pub(crate) const FILE_TO_FILE: [u8; 8] = [0, 1, 2, 3, 3, 2, 1, 0];
 const WDL_TO_MAP: [i32; 5] = [1, 3, 0, 2, 0];
 const PA_FLAGS: [u8; 5] = [8, 0, 0, 0, 4];
 
 pub(crate) struct Indices {
-    binomial: [[u64; 64]; 7],
-    pawn_idx: [[u64; 24]; 6],
+    pub(crate) binomial: [[u64; 64]; 7],
+    pub(crate) pawn_idx: [[u64; 24]; 6],
     pub(crate) pawn_factor_file: [[u64; 4]; 6],
 }
 
@@ -2038,226 +1983,6 @@ mod index_tests {
     }
 }
 
-pub(crate) unsafe fn leading_pawn(p: *mut i32, be: *mut BaseEntry) -> i32 {
-    let mut i = 1;
-    while i < (*be).c2rust_unnamed.pawns[0] as i32 {
-        if FLAP[*p as usize] > FLAP[*p.offset(i as isize) as usize] {
-            std::ptr::swap(p, p.offset(i as isize));
-        }
-        i += 1;
-    }
-    FILE_TO_FILE[(*p & 7) as usize] as i32
-}
-
-pub(crate) unsafe fn encode(
-    mut p: *mut i32,
-    mut ei: *mut EncInfo,
-    mut be: *mut BaseEntry,
-    enc: i32,
-) -> u64 {
-    let mut n: i32 = (*be).num as i32;
-    let mut idx: u64 = 0;
-    let mut k: i32 = 0;
-    if *p.offset(0) & 0x4 != 0 {
-        let mut i: i32 = 0;
-        while i < n {
-            *p.offset(i as isize) ^= 0x7;
-            i += 1;
-        }
-    }
-    if enc == PIECE_ENC as i32 {
-        if *p.offset(0) & 0x20 != 0 {
-            let mut i_0: i32 = 0;
-            while i_0 < n {
-                *p.offset(i_0 as isize) ^= 0x38;
-                i_0 += 1;
-            }
-        }
-        let mut i_1: i32 = 0;
-        while i_1 < n {
-            if OFF_DIAG[*p.offset(i_1 as isize) as usize] != 0 {
-                if OFF_DIAG[*p.offset(i_1 as isize) as usize] as i32 > 0
-                    && i_1
-                        < (if (*be).c2rust_unnamed.kk_enc as i32 != 0 {
-                            2
-                        } else {
-                            3
-                        })
-                {
-                    let mut j: i32 = 0;
-                    while j < n {
-                        *p.offset(j as isize) = FLIP_DIAG[*p.offset(j as isize) as usize] as i32;
-                        j += 1;
-                    }
-                }
-                break;
-            } else {
-                i_1 += 1;
-            }
-        }
-        if (*be).c2rust_unnamed.kk_enc {
-            idx = KK_IDX[TRIANGLE[*p.offset(0) as usize] as usize][*p.offset(1) as usize] as u64;
-            k = 2;
-        } else {
-            let mut s1: i32 = (*p.offset(1) > *p.offset(0)) as i32;
-            let mut s2: i32 =
-                (*p.offset(2) > *p.offset(0)) as i32 + (*p.offset(2) > *p.offset(1)) as i32;
-            if OFF_DIAG[*p.offset(0) as usize] != 0 {
-                idx = (TRIANGLE[*p.offset(0) as usize] as i32 * 63 * 62
-                    + (*p.offset(1) - s1) * 62
-                    + (*p.offset(2) - s2)) as u64;
-            } else if OFF_DIAG[*p.offset(1) as usize] != 0 {
-                idx = (6 * 63 * 62
-                    + DIAG[*p.offset(0) as usize] as i32 * 28 * 62
-                    + LOWER[*p.offset(1) as usize] as i32 * 62
-                    + *p.offset(2)
-                    - s2) as u64;
-            } else if OFF_DIAG[*p.offset(2) as usize] != 0 {
-                idx = (6 * 63 * 62
-                    + 4 * 28 * 62
-                    + DIAG[*p.offset(0) as usize] as i32 * 7 * 28
-                    + (DIAG[*p.offset(1) as usize] as i32 - s1) * 28
-                    + LOWER[*p.offset(2) as usize] as i32) as u64;
-            } else {
-                idx = (6 * 63 * 62
-                    + 4 * 28 * 62
-                    + 4 * 7 * 28
-                    + DIAG[*p.offset(0) as usize] as i32 * 7 * 6
-                    + (DIAG[*p.offset(1) as usize] as i32 - s1) * 6
-                    + (DIAG[*p.offset(2) as usize] as i32 - s2)) as u64;
-            }
-            k = 3;
-        }
-        idx *= (*ei).factor[0];
-    } else {
-        let mut i_2: i32 = 1;
-        while i_2 < (*be).c2rust_unnamed.pawns[0] as i32 {
-            let mut j_0: i32 = i_2 + 1;
-            while j_0 < (*be).c2rust_unnamed.pawns[0] as i32 {
-                if (PAWN_TWIST[*p.offset(i_2 as isize) as usize] as i32)
-                    < PAWN_TWIST[*p.offset(j_0 as isize) as usize] as i32
-                {
-                    let mut tmp: i32 = *p.offset(i_2 as isize);
-                    *p.offset(i_2 as isize) = *p.offset(j_0 as isize);
-                    *p.offset(j_0 as isize) = tmp;
-                }
-                j_0 += 1;
-            }
-            i_2 += 1;
-        }
-        k = (*be).c2rust_unnamed.pawns[0] as i32;
-        idx = INDICES.pawn_idx[(k - 1) as usize][FLAP[*p.offset(0) as usize] as usize];
-        let mut i_3: i32 = 1;
-        while i_3 < k {
-            idx = idx.wrapping_add(
-                INDICES.binomial[(k - i_3) as usize]
-                    [PAWN_TWIST[*p.offset(i_3 as isize) as usize] as usize],
-            );
-            i_3 += 1;
-        }
-        idx *= (*ei).factor[0];
-        if (*be).c2rust_unnamed.pawns[1] != 0 {
-            let mut t: i32 = k + (*be).c2rust_unnamed.pawns[1] as i32;
-            let mut i_4: i32 = k;
-            while i_4 < t {
-                let mut j_1: i32 = i_4 + 1;
-                while j_1 < t {
-                    if *p.offset(i_4 as isize) > *p.offset(j_1 as isize) {
-                        let mut tmp_0: i32 = *p.offset(i_4 as isize);
-                        *p.offset(i_4 as isize) = *p.offset(j_1 as isize);
-                        *p.offset(j_1 as isize) = tmp_0;
-                    }
-                    j_1 += 1;
-                }
-                i_4 += 1;
-            }
-            let mut s: u64 = 0;
-            let mut i_5: i32 = k;
-            while i_5 < t {
-                let mut sq: i32 = *p.offset(i_5 as isize);
-                let mut skips: i32 = 0;
-                let mut j_2: i32 = 0;
-                while j_2 < k {
-                    skips += (sq > *p.offset(j_2 as isize)) as i32;
-                    j_2 += 1;
-                }
-                s = s.wrapping_add(
-                    INDICES.binomial[(i_5 - k + 1) as usize][(sq - skips - 8) as usize],
-                );
-                i_5 += 1;
-            }
-            idx = idx.wrapping_add(s * (*ei).factor[k as usize]);
-            k = t;
-        }
-    }
-    while k < n {
-        let mut t_0: i32 = k + (*ei).norm[k as usize] as i32;
-        let mut i_6: i32 = k;
-        while i_6 < t_0 {
-            let mut j_3: i32 = i_6 + 1;
-            while j_3 < t_0 {
-                if *p.offset(i_6 as isize) > *p.offset(j_3 as isize) {
-                    let mut tmp_1: i32 = *p.offset(i_6 as isize);
-                    *p.offset(i_6 as isize) = *p.offset(j_3 as isize);
-                    *p.offset(j_3 as isize) = tmp_1;
-                }
-                j_3 += 1;
-            }
-            i_6 += 1;
-        }
-        let mut s_0: u64 = 0;
-        let mut i_7: i32 = k;
-        while i_7 < t_0 {
-            let mut sq_0: i32 = *p.offset(i_7 as isize);
-            let mut skips_0: i32 = 0;
-            let mut j_4: i32 = 0;
-            while j_4 < k {
-                skips_0 += (sq_0 > *p.offset(j_4 as isize)) as i32;
-                j_4 += 1;
-            }
-            s_0 = s_0
-                .wrapping_add(INDICES.binomial[(i_7 - k + 1) as usize][(sq_0 - skips_0) as usize]);
-            i_7 += 1;
-        }
-        idx = idx.wrapping_add(s_0 * (*ei).factor[k as usize]);
-        k = t_0;
-    }
-    idx
-}
-unsafe fn encode_piece(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseEntry) -> u64 {
-    encode(p, ei, be, PIECE_ENC as i32)
-}
-unsafe fn encode_pawn_f(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseEntry) -> u64 {
-    encode(p, ei, be, FILE_ENC as i32)
-}
-#[inline]
-unsafe fn fill_squares(
-    mut pos: *const PyrrhicPosition,
-    mut pc: *const u8,
-    mut flip: bool,
-    mut mirror: i32,
-    mut p: *mut i32,
-    mut i: i32,
-) -> i32 {
-    let mut color: i32 = pyrrhic_colour_of_piece(*pc.offset(i as isize));
-    if flip {
-        color = (color == 0) as i32;
-    }
-    let mut bb: u64 =
-        pyrrhic_pieces_by_type(pos, color, pyrrhic_type_of_piece(*pc.offset(i as isize)));
-    let mut sq: u32 = 0;
-    loop {
-        sq = poplsb(&mut bb) as u32;
-        let fresh28 = i;
-        i += 1;
-        *p.offset(fresh28 as isize) = (sq ^ mirror as u32) as i32;
-        if bb == 0 {
-            break;
-        }
-    }
-    i
-}
-
 fn load_table(
     owner: &Generation,
     pos: *const PyrrhicPosition,
@@ -2301,8 +2026,8 @@ fn load_table(
             &INDICES.pawn_factor_file,
         )
         .map_err(|_| LoadError::MissingOrInvalid)?;
-        let mut table = LoadedTable::new(original);
-        table.install(backing, parsed, kind)?;
+        let mut table = LoadedTable::new(original, description);
+        table.install(backing, parsed);
         Ok(table)
     }
 }
@@ -2367,13 +2092,13 @@ pub(crate) unsafe fn probe_table(
         flip = (*pos).turn as i32 != PYRRHIC_WHITE as i32;
         bside = false;
     }
-    let mut ei: *mut EncInfo = first_ei(be, type_0);
-    let mut p: [i32; 7] = [0; 7];
-    let mut idx: u64 = 0;
-    let mut t: i32 = 0;
+    let description = table.description;
+    let position = &*pos;
+    let mut squares = [0u8; 7];
+    let mut t: usize = 0;
     let mut flags: u8 = 0;
     let pair_index: usize;
-    if !(*be).hasPawns {
+    let idx: u64 = if !(*be).hasPawns {
         pair_index = if type_0 == WDL as i32 {
             usize::from(bside)
         } else {
@@ -2390,33 +2115,55 @@ pub(crate) unsafe fn probe_table(
                 return 0;
             }
         }
-        ei = if type_0 != DTZ as i32 {
-            ei.offset(bside as isize)
-        } else {
-            ei
+        let Some(encoding) = parsed.encodings.get(pair_index) else {
+            *success = 0;
+            return 0;
         };
-        let mut i: i32 = 0;
-        while i < (*be).num as i32 {
-            i = fill_squares(pos, ((*ei).pieces).as_ptr(), flip, 0, p.as_mut_ptr(), i);
+        let mut filled = 0;
+        while filled < description.pieces {
+            let Ok(next) = fill_squares(
+                position,
+                encoding,
+                description,
+                flip,
+                0,
+                &mut squares,
+                filled,
+            ) else {
+                *success = 0;
+                return 0;
+            };
+            filled = next;
         }
-        idx = encode_piece(p.as_mut_ptr(), ei, be);
+        let Ok(value) = encode_squares(&mut squares, encoding, description) else {
+            *success = 0;
+            return 0;
+        };
+        value
     } else {
-        let mut i_0: i32 = fill_squares(
-            pos,
-            ((*ei).pieces).as_ptr(),
-            flip,
-            if flip as i32 != 0 { 0x38 } else { 0 },
-            p.as_mut_ptr(),
-            0,
-        );
-        t = leading_pawn(p.as_mut_ptr(), be);
+        let mirror = if flip { 0x38 } else { 0 };
+        let Some(first) = parsed.encodings.first() else {
+            *success = 0;
+            return 0;
+        };
+        let Ok(mut filled) =
+            fill_squares(position, first, description, flip, mirror, &mut squares, 0)
+        else {
+            *success = 0;
+            return 0;
+        };
+        let Ok(file) = leading_pawn(&mut squares, description.primary_pawns) else {
+            *success = 0;
+            return 0;
+        };
+        t = file;
         pair_index = if type_0 == WDL as i32 {
-            (t + 4 * bside as i32) as usize
+            t + 4 * usize::from(bside)
         } else {
-            t as usize
+            t
         };
         if type_0 == DTZ as i32 {
-            let Some(pair) = parsed.pairs.get(t as usize).and_then(Option::as_ref) else {
+            let Some(pair) = parsed.pairs.get(t).and_then(Option::as_ref) else {
                 *success = 0;
                 return 0;
             };
@@ -2426,23 +2173,31 @@ pub(crate) unsafe fn probe_table(
                 return 0;
             }
         }
-        ei = if type_0 == WDL as i32 {
-            ei.offset((t + 4 * bside as i32) as isize)
-        } else {
-            ei.offset(t as isize)
+        let Some(encoding) = parsed.encodings.get(pair_index) else {
+            *success = 0;
+            return 0;
         };
-        while i_0 < (*be).num as i32 {
-            i_0 = fill_squares(
-                pos,
-                ((*ei).pieces).as_ptr(),
+        while filled < description.pieces {
+            let Ok(next) = fill_squares(
+                position,
+                encoding,
+                description,
                 flip,
-                if flip as i32 != 0 { 0x38 } else { 0 },
-                p.as_mut_ptr(),
-                i_0,
-            );
+                mirror,
+                &mut squares,
+                filled,
+            ) else {
+                *success = 0;
+                return 0;
+            };
+            filled = next;
         }
-        idx = encode_pawn_f(p.as_mut_ptr(), ei, be);
-    }
+        let Ok(value) = encode_squares(&mut squares, encoding, description) else {
+            *success = 0;
+            return 0;
+        };
+        value
+    };
     let Some(pair) = parsed.pairs.get(pair_index).and_then(Option::as_ref) else {
         *success = 0;
         return 0;
@@ -2475,7 +2230,7 @@ pub(crate) unsafe fn probe_table(
         let category = WDL_TO_MAP[wdl_index] as usize;
         let Some(range) = parsed
             .map_ranges
-            .get(t as usize)
+            .get(t)
             .and_then(|ranges| ranges.get(category))
         else {
             *success = 0;
@@ -2905,15 +2660,9 @@ mod initialization_tests {
             assert_eq!(state.piece_entry.len(), 650);
             assert_eq!(state.pawn_entry.len(), 861);
             for entry in &state.piece_entry {
-                assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
-                assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
-                assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
                 assert!(entry.be.loaded.iter().all(|cell| cell.get().is_none()));
             }
             for entry in &state.pawn_entry {
-                assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
-                assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
-                assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
                 assert!(entry.be.loaded.iter().all(|cell| cell.get().is_none()));
             }
         }

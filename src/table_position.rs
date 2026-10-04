@@ -243,7 +243,7 @@ pub(crate) fn apply_move<E: EngineAdapter>(
     } else if them & to_bit != 0 {
         next.rule50 = 0;
     } else {
-        next.rule50 = position.rule50.wrapping_add(1);
+        next.rule50 = position.rule50.saturating_add(1);
     }
     moved_side_is_legal::<E>(&next).map(|legal| legal.then_some(ValidatedPosition(next)))
 }
@@ -324,6 +324,56 @@ mod tests {
         assert_eq!(captured.pawns.count_ones(), 1);
         assert_eq!(captured.white & (1 << 28), 0);
         assert_eq!(captured.black & (1 << 20), 1 << 20);
+    }
+
+    #[test]
+    fn quiet_moves_at_maximum_clock_do_not_look_like_zeroing_moves() {
+        // Root probing distinguishes zeroing moves by comparing the private
+        // successor clock to zero; wrapping 255 would change its DTZ ranking.
+        let base = PyrrhicPosition {
+            white: (1 << 4) | (1 << 3) | (1 << 12),
+            black: (1 << 60) | (1 << 51),
+            kings: (1 << 4) | (1 << 60),
+            queens: 1 << 3,
+            rooks: 1 << 51,
+            bishops: 0,
+            knights: 0,
+            pawns: 1 << 12,
+            rule50: u8::MAX,
+            ep: 0,
+            turn: true,
+        };
+        let position = ValidatedPosition::from_public_checked(base);
+        let quiet = pyrrhic_make_move(0, 4, 5);
+        assert_eq!(
+            apply_move::<Cozy>(&position, quiet)
+                .unwrap()
+                .unwrap()
+                .rule50,
+            255
+        );
+        let earlier = ValidatedPosition::from_public_checked(PyrrhicPosition {
+            rule50: 254,
+            ..base
+        });
+        assert_eq!(
+            apply_move::<Cozy>(&earlier, quiet).unwrap().unwrap().rule50,
+            255
+        );
+        assert_eq!(
+            apply_move::<Cozy>(&position, pyrrhic_make_move(0, 12, 20))
+                .unwrap()
+                .unwrap()
+                .rule50,
+            0
+        );
+        assert_eq!(
+            apply_move::<Cozy>(&position, pyrrhic_make_move(0, 3, 51))
+                .unwrap()
+                .unwrap()
+                .rule50,
+            0
+        );
     }
 
     #[test]

@@ -8,8 +8,9 @@ edition = "2021"
 autobins = false
 license = "MIT"
 description = "A pure-Rust library to probe Syzygy Tablebases within a chess engine"
-repository = "https://github.com/Algorhythm-sxv/pyrrhic-rs"
+repository = "https://github.com/starius/pyrrhic-rs"
 readme = "README.md"
+exclude = ["tools/**", "nix/**", ".github/**"]
 keywords = ["chess", "tablebase", "syzygy"]
 categories = ["game-development"]
 

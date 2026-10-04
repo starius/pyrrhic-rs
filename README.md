@@ -4,6 +4,9 @@
 chess-engine search. This fork retains the original MIT attribution
 and the Pyrrhic table format and probing policy.
 
+It is based on [Algorhythm's pyrrhic-rs](https://github.com/Algorhythm-sxv/pyrrhic-rs).
+The original Rust and Pyrrhic notices are in `LICENSE` and `LICENSE-PYRRHIC`.
+
 ## Usage
 
 The parser, decoder, encoder, move generator, recursive probe, and generation
@@ -75,3 +78,12 @@ fn main() {
 - Ronald "Syzygy" de Man, creator of the Syzygy tablebases
 - [C2Rust](https://github.com/immunant/c2rust), used for the original translation
   of the C implementation into Rust
+
+## Validation
+
+With Rust and Cargo installed, run `cargo fmt --all --check`,
+`cargo clippy --locked --all-targets --all-features -- -D warnings`, and
+`cargo test --locked --all-features`. Tests marked `ignored` need Syzygy table
+files; their required material and environment variables are stated beside
+each test. Run `cargo package --locked --list` to inspect the distributable
+library archive.

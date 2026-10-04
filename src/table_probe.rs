@@ -7,10 +7,9 @@ use crate::{
     table_moves::{generate_captures, generate_moves, MoveList},
     table_position::{
         apply_move, is_capture, is_en_passant, is_pawn_move, side_to_move_is_in_check,
+        ValidatedPosition,
     },
-    tbprobe::{
-        pyrrhic_move_from, pyrrhic_move_promotes, pyrrhic_move_to, PyrrhicMove, PyrrhicPosition,
-    },
+    tbprobe::{pyrrhic_move_from, pyrrhic_move_promotes, pyrrhic_move_to, PyrrhicMove},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,7 +29,7 @@ pub(crate) struct RootValue {
 
 const WDL_TO_DTZ: [i32; 5] = [-1, -101, 0, 101, 1];
 
-fn table_wdl(owner: &Generation, pos: &PyrrhicPosition) -> Result<i32, ProbeError> {
+fn table_wdl(owner: &Generation, pos: &ValidatedPosition) -> Result<i32, ProbeError> {
     match probe_table_value(owner, pos, 0, false) {
         Ok(TableProbeValue::Value(value)) => Ok(value),
         _ => Err(ProbeError),
@@ -39,7 +38,7 @@ fn table_wdl(owner: &Generation, pos: &PyrrhicPosition) -> Result<i32, ProbeErro
 
 fn table_dtz(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
     wdl: i32,
 ) -> Result<Option<i32>, ProbeError> {
     match probe_table_value(owner, pos, wdl, true) {
@@ -50,13 +49,13 @@ fn table_dtz(
 }
 
 fn successor<E: EngineAdapter>(
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
     candidate: PyrrhicMove,
-) -> Result<Option<PyrrhicPosition>, ProbeError> {
+) -> Result<Option<ValidatedPosition>, ProbeError> {
     apply_move::<E>(pos, candidate).map_err(|_| ProbeError)
 }
 
-fn legal_moves<E: EngineAdapter>(pos: &PyrrhicPosition) -> Result<MoveList<256>, ProbeError> {
+fn legal_moves<E: EngineAdapter>(pos: &ValidatedPosition) -> Result<MoveList<256>, ProbeError> {
     let mut legal = MoveList::new();
     for &candidate in generate_moves::<E>(pos).map_err(|_| ProbeError)?.as_slice() {
         if successor::<E>(pos, candidate)?.is_some() {
@@ -66,7 +65,7 @@ fn legal_moves<E: EngineAdapter>(pos: &PyrrhicPosition) -> Result<MoveList<256>,
     Ok(legal)
 }
 
-fn is_mate<E: EngineAdapter>(pos: &PyrrhicPosition) -> Result<bool, ProbeError> {
+fn is_mate<E: EngineAdapter>(pos: &ValidatedPosition) -> Result<bool, ProbeError> {
     if !side_to_move_is_in_check::<E>(pos).map_err(|_| ProbeError)? {
         return Ok(false);
     }
@@ -80,7 +79,7 @@ fn is_mate<E: EngineAdapter>(pos: &PyrrhicPosition) -> Result<bool, ProbeError> 
 
 fn probe_ab<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
     mut alpha: i32,
     beta: i32,
 ) -> Result<i32, ProbeError> {
@@ -108,7 +107,7 @@ fn probe_ab<E: EngineAdapter>(
 
 fn probe_wdl<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
 ) -> Result<WdlValue, ProbeError> {
     let mut best_capture = -3;
     let mut best_ep = -3;
@@ -179,7 +178,7 @@ fn wdl_to_dtz(wdl: i32) -> Result<i32, ProbeError> {
 
 fn probe_dtz_inner<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
     depth: u16,
 ) -> Result<i32, ProbeError> {
     // A wrong-side DTZ entry is resolved by probing successor positions.
@@ -238,7 +237,7 @@ fn probe_dtz_inner<E: EngineAdapter>(
 
 pub(crate) fn probe_wdl_public<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
 ) -> Result<u32, ProbeError> {
     let score = probe_wdl::<E>(owner, pos)?.score;
     u32::try_from(score + 2).map_err(|_| ProbeError)
@@ -246,7 +245,7 @@ pub(crate) fn probe_wdl_public<E: EngineAdapter>(
 
 pub(crate) fn probe_dtz_public<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
 ) -> Result<i32, ProbeError> {
     probe_dtz_inner::<E>(owner, pos, 0)
 }
@@ -271,7 +270,7 @@ fn dtz_to_wdl(clock: u8, dtz: i32) -> u32 {
     (score + 2) as u32
 }
 
-fn pack_move(pos: &PyrrhicPosition, candidate: PyrrhicMove, dtz: i32) -> u32 {
+fn pack_move(pos: &ValidatedPosition, candidate: PyrrhicMove, dtz: i32) -> u32 {
     dtz_to_wdl(pos.rule50, dtz)
         | (pyrrhic_move_from(candidate) << 10)
         | (pyrrhic_move_to(candidate) << 4)
@@ -282,7 +281,7 @@ fn pack_move(pos: &PyrrhicPosition, candidate: PyrrhicMove, dtz: i32) -> u32 {
 
 pub(crate) fn probe_root_public<E: EngineAdapter>(
     owner: &Generation,
-    pos: &PyrrhicPosition,
+    pos: &ValidatedPosition,
 ) -> Result<RootValue, ProbeError> {
     let dtz = probe_dtz_inner::<E>(owner, pos, 0)?;
     let moves = generate_moves::<E>(pos).map_err(|_| ProbeError)?;

@@ -6,6 +6,7 @@ use std::{
 use crate::{
     engine_adapter::{Color, EngineAdapter, Piece},
     table_lookup::Generation,
+    table_position::ValidatedPosition,
     table_probe::{probe_dtz_public, probe_root_public, probe_wdl_public},
     tbprobe::PyrrhicPosition,
 };
@@ -212,7 +213,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        let position = PyrrhicPosition {
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
             white,
             black,
             kings,
@@ -224,7 +225,7 @@ impl<E: EngineAdapter> TableBases<E> {
             rule50: 0,
             ep: ep as u8,
             turn,
-        };
+        });
         let result = probe_wdl_public::<E>(self.handle.as_ref(), &position)
             .map_err(|_| TBError::ProbeFailed)?;
 
@@ -259,7 +260,7 @@ impl<E: EngineAdapter> TableBases<E> {
         ) {
             return Err(TBError::ProbeFailed);
         }
-        let position = PyrrhicPosition {
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
             white,
             black,
             kings,
@@ -271,7 +272,7 @@ impl<E: EngineAdapter> TableBases<E> {
             rule50: 0,
             ep: ep as u8,
             turn,
-        };
+        });
         probe_dtz_public::<E>(self.handle.as_ref(), &position).map_err(|_| TBError::ProbeFailed)
     }
 
@@ -303,7 +304,7 @@ impl<E: EngineAdapter> TableBases<E> {
             return Err(TBError::ProbeFailed);
         }
         let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
-        let position = PyrrhicPosition {
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
             white,
             black,
             kings,
@@ -315,7 +316,7 @@ impl<E: EngineAdapter> TableBases<E> {
             rule50: rule50 as u8,
             ep: ep as u8,
             turn,
-        };
+        });
         let packed = probe_root_public::<E>(self.handle.as_ref(), &position)
             .map_err(|_| TBError::ProbeFailed)?;
 

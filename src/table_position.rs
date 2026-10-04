@@ -7,6 +7,26 @@ use crate::{
     },
 };
 
+/// A position admitted by the public bitboard validation or produced by a
+/// checked move. Recursive probing passes this value instead of revalidating
+/// every bitboard at each node.
+#[derive(Clone, Copy)]
+pub(crate) struct ValidatedPosition(PyrrhicPosition);
+
+impl ValidatedPosition {
+    pub(crate) fn from_public_checked(position: PyrrhicPosition) -> Self {
+        Self(position)
+    }
+}
+
+impl std::ops::Deref for ValidatedPosition {
+    type Target = PyrrhicPosition;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PositionError;
 
@@ -137,9 +157,9 @@ fn ep_after_double_push<E: EngineAdapter>(
 }
 
 pub(crate) fn apply_move<E: EngineAdapter>(
-    position: &PyrrhicPosition,
+    position: &ValidatedPosition,
     candidate: PyrrhicMove,
-) -> Result<Option<PyrrhicPosition>, PositionError> {
+) -> Result<Option<ValidatedPosition>, PositionError> {
     let from = pyrrhic_move_from(candidate);
     let to = pyrrhic_move_to(candidate);
     let from_bit = bit(from)?;
@@ -224,12 +244,12 @@ pub(crate) fn apply_move<E: EngineAdapter>(
     } else {
         next.rule50 = position.rule50.wrapping_add(1);
     }
-    moved_side_is_legal::<E>(&next).map(|legal| legal.then_some(next))
+    moved_side_is_legal::<E>(&next).map(|legal| legal.then_some(ValidatedPosition(next)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_move, PositionError};
+    use super::{apply_move, PositionError, ValidatedPosition};
     use crate::{
         engine_adapter::{Color, EngineAdapter},
         tbprobe::{pyrrhic_make_move, PyrrhicPosition},
@@ -279,7 +299,7 @@ mod tests {
     fn double_push_and_en_passant_preserve_the_piece_population() {
         // This observes the private EP transition and piece masks, which a
         // root-move TSV fixture does not expose.
-        let position = PyrrhicPosition {
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
             white: (1 << 4) | (1 << 12),
             black: (1 << 60) | (1 << 27),
             kings: (1 << 4) | (1 << 60),
@@ -291,7 +311,7 @@ mod tests {
             rule50: 19,
             ep: 0,
             turn: true,
-        };
+        });
         let pushed = apply_move::<Cozy>(&position, pyrrhic_make_move(0, 12, 28))
             .unwrap()
             .unwrap();
@@ -307,11 +327,11 @@ mod tests {
 
     #[test]
     fn king_capture_and_missing_mover_are_rejected() {
-        let position = PyrrhicPosition {
-            white: (1 << 4) | (1 << 54),
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
+            white: (1 << 4) | (1 << 46),
             black: 1 << 63,
             kings: (1 << 4) | (1 << 63),
-            queens: 1 << 54,
+            queens: 1 << 46,
             rooks: 0,
             bishops: 0,
             knights: 0,
@@ -319,14 +339,43 @@ mod tests {
             rule50: 0,
             ep: 0,
             turn: true,
-        };
+        });
         assert!(matches!(
-            apply_move::<Cozy>(&position, pyrrhic_make_move(0, 54, 63)),
+            apply_move::<Cozy>(&position, pyrrhic_make_move(0, 46, 63)),
             Err(PositionError)
         ));
         assert!(matches!(
             apply_move::<Cozy>(&position, pyrrhic_make_move(0, 30, 31)),
             Err(PositionError)
         ));
+    }
+
+    #[test]
+    fn promotion_requires_a_pawn_and_an_explicit_piece() {
+        // This checks the private move encoding contract, not a root choice.
+        let position = ValidatedPosition::from_public_checked(PyrrhicPosition {
+            white: (1 << 4) | (1 << 48),
+            black: 1 << 60,
+            kings: (1 << 4) | (1 << 60),
+            queens: 0,
+            rooks: 0,
+            bishops: 0,
+            knights: 0,
+            pawns: 1 << 48,
+            rule50: 0,
+            ep: 0,
+            turn: true,
+        });
+        assert!(matches!(
+            apply_move::<Cozy>(&position, pyrrhic_make_move(0, 48, 56)),
+            Err(PositionError)
+        ));
+        assert!(matches!(
+            apply_move::<Cozy>(&position, pyrrhic_make_move(5, 48, 56)),
+            Err(PositionError)
+        ));
+        assert!(apply_move::<Cozy>(&position, pyrrhic_make_move(1, 48, 56))
+            .unwrap()
+            .is_some());
     }
 }

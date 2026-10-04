@@ -5,7 +5,6 @@
 #![allow(non_upper_case_globals)]
 #![allow(unused_assignments)]
 #![allow(unused_mut)]
-
 #![doc = include_str!("../README.md")]
 
 extern crate libc;
@@ -13,8 +12,8 @@ pub mod engine_adapter;
 mod tbprobe;
 
 pub mod tablebases;
-pub use tablebases::*;
 pub use engine_adapter::*;
+pub use tablebases::*;
 
 #[cfg(test)]
 mod tests;

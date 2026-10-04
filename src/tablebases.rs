@@ -90,6 +90,100 @@ pub struct TableBases<E: EngineAdapter> {
 
 static ROOT_PROBE_MUTEX: Mutex<()> = Mutex::new(());
 
+/// Reject bitboards that the translated encoder cannot safely represent.
+/// The caller may pass an arbitrary position through this safe API.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn valid_probe_position(
+    white: u64,
+    black: u64,
+    kings: u64,
+    queens: u64,
+    rooks: u64,
+    bishops: u64,
+    knights: u64,
+    pawns: u64,
+    ep: u32,
+    turn: bool,
+) -> bool {
+    let occupied = white | black;
+    if white & black != 0
+        || !(2..=7).contains(&occupied.count_ones())
+        || (kings & white).count_ones() != 1
+        || (kings & black).count_ones() != 1
+        || pawns & 0xff00_0000_0000_00ff != 0
+    {
+        return false;
+    }
+
+    let mut seen = 0;
+    for pieces in [kings, queens, rooks, bishops, knights, pawns] {
+        if seen & pieces != 0 {
+            return false;
+        }
+        seen |= pieces;
+    }
+    if seen != occupied {
+        return false;
+    }
+
+    // The pawnless king-pair index contains -1 for adjacent kings. Do not
+    // pass such an index to the decoder, even when a material file exists.
+    let white_king = (kings & white).trailing_zeros();
+    let black_king = (kings & black).trailing_zeros();
+    if (white_king % 8).abs_diff(black_king % 8) <= 1
+        && (white_king / 8).abs_diff(black_king / 8) <= 1
+    {
+        return false;
+    }
+
+    if ep != 0 {
+        let expected_rank = if turn { 5 } else { 2 };
+        if ep >= 64 || ep / 8 != expected_rank || occupied & (1u64 << ep) != 0 {
+            return false;
+        }
+        let captured = if turn { ep - 8 } else { ep + 8 };
+        let opponent = if turn { black } else { white };
+        if pawns & opponent & (1u64 << captured) == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::valid_probe_position;
+
+    #[test]
+    fn reject_bitboards_that_the_encoder_cannot_represent() {
+        let kings = (1u64 << 12) | (1u64 << 60);
+        let pawns = (1u64 << 0) | (1u64 << 1);
+        let white = (1u64 << 12) | (1u64 << 0);
+        let black = (1u64 << 60) | (1u64 << 1);
+        let valid = |white, black, kings, pawns, ep| {
+            valid_probe_position(white, black, kings, 0, 0, 0, 0, pawns, ep, true)
+        };
+        assert!(!valid(white, black, kings, pawns, 0));
+        assert!(!valid(white | black, black, kings, pawns, 0));
+        assert!(!valid(white, black, kings | pawns, pawns, 0));
+        let valid_white = (1u64 << 12) | (1u64 << 36);
+        let valid_black = (1u64 << 60) | (1u64 << 35);
+        let valid_pawns = (1u64 << 36) | (1u64 << 35);
+        assert!(valid(valid_white, valid_black, kings, valid_pawns, 43));
+        let adjacent_kings = (1u64 << 12) | (1u64 << 20);
+        assert!(!valid(
+            valid_white,
+            (1u64 << 20) | (1u64 << 35),
+            adjacent_kings,
+            valid_pawns,
+            43
+        ));
+        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 19));
+        assert!(!valid(valid_white, valid_black, kings, valid_pawns, 64));
+    }
+}
+
 impl<E: EngineAdapter> TableBases<E> {
     /// Initialize the tablebases
     /// * `path` - tablebase directories separated by ':' on Unix or ';' on Windows.
@@ -129,6 +223,11 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<WdlProbeResult, TBError> {
+        if !valid_probe_position(
+            white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+        ) {
+            return Err(TBError::ProbeFailed);
+        }
         let _scope = self.handle.enter();
         let result = unsafe {
             tb_probe_wdl::<E>(
@@ -162,6 +261,11 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<i32, TBError> {
+        if !valid_probe_position(
+            white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+        ) {
+            return Err(TBError::ProbeFailed);
+        }
         let _scope = self.handle.enter();
         unsafe {
             tbprobe::tb_probe_dtz::<E>(
@@ -191,6 +295,13 @@ impl<E: EngineAdapter> TableBases<E> {
         ep: u32,
         turn: bool,
     ) -> Result<DtzProbeResult, TBError> {
+        if rule50 > u8::MAX as u32
+            || !valid_probe_position(
+                white, black, kings, queens, rooks, bishops, knights, pawns, ep, turn,
+            )
+        {
+            return Err(TBError::ProbeFailed);
+        }
         let _scope = self.handle.enter();
         let _guard = ROOT_PROBE_MUTEX.lock().map_err(|_| TBError::ProbeFailed)?;
         let mut results = [0u32; 256];

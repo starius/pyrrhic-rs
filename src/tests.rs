@@ -371,6 +371,49 @@ fn probe_wdl_for_board(
 }
 
 #[test]
+fn invalid_pawn_placement_is_rejected_by_every_probe_entry_point() {
+    let temporary = if std::env::var("SYZYGY_PATH").is_ok() {
+        None
+    } else {
+        let dir = std::env::temp_dir().join(format!("pyrrhic-invalid-pos-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for ext in ["rtbw", "rtbz"] {
+            std::fs::File::create(dir.join(format!("KPvKP.{ext}")))
+                .unwrap()
+                .set_len(80)
+                .unwrap();
+        }
+        Some(dir)
+    };
+    let path = std::env::var("SYZYGY_PATH")
+        .unwrap_or_else(|_| temporary.as_ref().unwrap().to_str().unwrap().to_owned());
+    let tb = TableBases::<CozyChessAdapter>::new(path).unwrap();
+
+    // Both pawns are on the first rank. The secondary pawn would make the
+    // translated encoder index BINOMIAL with a negative square offset.
+    let white = (1u64 << 12) | (1u64 << 0);
+    let black = (1u64 << 60) | (1u64 << 1);
+    let kings = (1u64 << 12) | (1u64 << 60);
+    let pawns = (1u64 << 0) | (1u64 << 1);
+    assert_eq!(
+        tb.probe_wdl(white, black, kings, 0, 0, 0, 0, pawns, 0, true),
+        Err(TBError::ProbeFailed)
+    );
+    assert_eq!(
+        tb.probe_dtz(white, black, kings, 0, 0, 0, 0, pawns, 0, true),
+        Err(TBError::ProbeFailed)
+    );
+    assert_eq!(
+        tb.probe_root(white, black, kings, 0, 0, 0, 0, pawns, 0, 0, true),
+        Err(TBError::ProbeFailed)
+    );
+    drop(tb);
+    if let Some(dir) = temporary {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn path_components_are_bounded_and_embedded_nul_fails() {
     let dir = std::env::temp_dir().join(format!("pyrrhic-path-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

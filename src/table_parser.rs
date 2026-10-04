@@ -76,8 +76,6 @@ pub(crate) struct ParsedTable {
     pub(crate) split: bool,
     pub(crate) encodings: Vec<Encoding>,
     pub(crate) pairs: Vec<Option<ParsedPair>>,
-    pub(crate) map_origin: usize,
-    pub(crate) map_indices: Vec<[u16; 4]>,
     pub(crate) map_ranges: Vec<[Range<usize>; 4]>,
 }
 
@@ -85,16 +83,6 @@ fn take_range(cursor: &mut Cursor<'_>, len: usize) -> Result<Range<usize>, Parse
     let start = cursor.position();
     cursor.take(len)?;
     Ok(start..cursor.position())
-}
-
-fn map_index(offset: usize, origin: usize, width: usize) -> Result<u16, ParseError> {
-    let relative = offset
-        .checked_sub(origin)
-        .ok_or(ParseError::InvalidFormat)?;
-    if relative % width != 0 {
-        return Err(ParseError::InvalidFormat);
-    }
-    u16::try_from(relative / width).map_err(|_| ParseError::InvalidFormat)
 }
 
 pub(crate) fn parse_table(
@@ -147,8 +135,6 @@ pub(crate) fn parse_table(
         }
     }
 
-    let map_origin = cursor.position();
-    let mut map_indices = vec![[0u16; 4]; tables];
     let mut map_ranges = vec![std::array::from_fn(|_| 0..0); tables];
     if !is_wdl {
         for table in 0..tables {
@@ -163,18 +149,16 @@ pub(crate) fn parse_table(
             if wide {
                 cursor.align(2)?;
             }
-            for category in 0..4 {
+            for range in &mut map_ranges[table] {
                 if wide {
                     let count = usize::from(cursor.read_u16()?);
-                    map_indices[table][category] = map_index(cursor.position(), map_origin, 2)?;
-                    map_ranges[table][category] = take_range(
+                    *range = take_range(
                         &mut cursor,
                         count.checked_mul(2).ok_or(ParseError::Overflow)?,
                     )?;
                 } else {
                     let count = usize::from(cursor.read_u8()?);
-                    map_indices[table][category] = map_index(cursor.position(), map_origin, 1)?;
-                    map_ranges[table][category] = take_range(&mut cursor, count)?;
+                    *range = take_range(&mut cursor, count)?;
                 }
             }
         }
@@ -226,8 +210,6 @@ pub(crate) fn parse_table(
         split,
         encodings,
         pairs,
-        map_origin,
-        map_indices,
         map_ranges,
     })
 }

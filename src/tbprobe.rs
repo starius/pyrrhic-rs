@@ -9,7 +9,8 @@ use std::{
 
 use crate::{
     storage::TableBytes,
-    table_parser::{parse_table, Description, PairHeader, ParsedTable},
+    table_decoder::decode_pair,
+    table_parser::{parse_table, Description, ParsedTable},
 };
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -19,9 +20,6 @@ enum TableType {
     Dtz = 1,
 }
 const TB_MIN_FILE_SIZE: u64 = 80;
-extern "C" {
-    fn memcpy(_: *mut libc::c_void, _: *const libc::c_void, _: usize) -> *mut libc::c_void;
-}
 
 pub(crate) const PYRRHIC_PRIME_BPAWN: u64 = 11695583624105689831;
 pub(crate) const PYRRHIC_BPAWN: u32 = 9;
@@ -79,9 +77,6 @@ pub(crate) union C2RustUnnamed_0 {
 pub(crate) struct PieceEntry {
     pub(crate) be: BaseEntry,
     pub(crate) ei: [EncInfo; 3],
-    pub(crate) dtzMap: *mut libc::c_void,
-    pub(crate) dtzMapIdx: [u16; 4],
-    pub(crate) dtzFlags: u8,
 }
 
 impl PieceEntry {
@@ -89,16 +84,12 @@ impl PieceEntry {
         Self {
             be: BaseEntry::initialized(),
             ei: [EncInfo::initialized(); 3],
-            dtzMap: std::ptr::null_mut(),
-            dtzMapIdx: [0; 4],
-            dtzFlags: 0,
         }
     }
 }
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub(crate) struct EncInfo {
-    pub(crate) precomp: *mut PairsData,
     pub(crate) factor: [u64; 7],
     pub(crate) pieces: [u8; 7],
     pub(crate) norm: [u8; 7],
@@ -107,54 +98,16 @@ pub(crate) struct EncInfo {
 impl EncInfo {
     fn initialized() -> Self {
         Self {
-            precomp: std::ptr::null_mut(),
             factor: [0; 7],
             pieces: [0; 7],
             norm: [0; 7],
         }
     }
 }
-#[derive(Copy, Clone)]
-#[repr(C)]
-pub(crate) struct PairsData {
-    pub(crate) indexTable: *mut u8,
-    pub(crate) sizeTable: *mut u16,
-    pub(crate) data: *mut u8,
-    pub(crate) offset: *mut u16,
-    pub(crate) symLen: *mut u8,
-    pub(crate) symPat: *mut u8,
-    pub(crate) blockSize: u8,
-    pub(crate) idxBits: u8,
-    pub(crate) minLen: u8,
-    pub(crate) constValue: [u8; 2],
-    pub(crate) base: *const u64,
-}
-
-impl PairsData {
-    fn initialized() -> Self {
-        Self {
-            indexTable: std::ptr::null_mut(),
-            sizeTable: std::ptr::null_mut(),
-            data: std::ptr::null_mut(),
-            offset: std::ptr::null_mut(),
-            symLen: std::ptr::null_mut(),
-            symPat: std::ptr::null_mut(),
-            blockSize: 0,
-            idxBits: 0,
-            minLen: 0,
-            constValue: [0; 2],
-            base: std::ptr::null(),
-        }
-    }
-}
-
 #[repr(C)]
 pub(crate) struct PawnEntry {
     pub(crate) be: BaseEntry,
     pub(crate) ei: [EncInfo; 12],
-    pub(crate) dtzMap: *mut libc::c_void,
-    pub(crate) dtzMapIdx: [[u16; 4]; 4],
-    pub(crate) dtzFlags: [u8; 4],
 }
 
 impl PawnEntry {
@@ -162,9 +115,6 @@ impl PawnEntry {
         Self {
             be: BaseEntry::initialized(),
             ei: [EncInfo::initialized(); 12],
-            dtzMap: std::ptr::null_mut(),
-            dtzMapIdx: [[0; 4]; 4],
-            dtzFlags: [0; 4],
         }
     }
 }
@@ -183,7 +133,6 @@ struct LoadedTable {
     storage: LoadedStorage,
     backing: Option<TableBytes>,
     parsed: Option<ParsedTable>,
-    pairs: Box<[PairsData]>,
 }
 
 impl LoadedTable {
@@ -197,7 +146,6 @@ impl LoadedTable {
             storage,
             backing: None,
             parsed: None,
-            pairs: Vec::new().into_boxed_slice(),
         };
         let destination = table.entry_ptr_mut();
         unsafe {
@@ -235,84 +183,16 @@ impl LoadedTable {
         parsed: ParsedTable,
         kind: TableType,
     ) -> Result<(), LoadError> {
-        let bytes = backing.as_slice();
-        let base = bytes.as_ptr();
-        let mut pairs = std::iter::repeat_with(PairsData::initialized)
-            .take(parsed.pairs.len())
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        for (index, pair) in parsed.pairs.iter().enumerate() {
-            let pair = pair.as_ref().ok_or(LoadError::MissingOrInvalid)?;
-            let raw = &mut pairs[index];
-            match &pair.header {
-                PairHeader::Constant { value, .. } => {
-                    raw.constValue[0] = *value;
-                }
-                PairHeader::Compressed {
-                    block_size,
-                    index_bits,
-                    min_len,
-                    offsets,
-                    bases,
-                    symbol_lengths,
-                    patterns,
-                    ..
-                } => {
-                    raw.blockSize = *block_size;
-                    raw.idxBits = *index_bits;
-                    raw.minLen = *min_len;
-                    raw.indexTable = unsafe { base.add(pair.index.start) }.cast_mut();
-                    raw.sizeTable = unsafe { base.add(pair.sizes.start) }
-                        .cast::<u16>()
-                        .cast_mut();
-                    raw.data = unsafe { base.add(pair.data.start) }.cast_mut();
-                    raw.offset = offsets.as_ptr().cast_mut();
-                    raw.base = bases.as_ptr();
-                    raw.symLen = symbol_lengths.as_ptr().cast_mut();
-                    raw.symPat = patterns.as_ptr().cast::<u8>().cast_mut();
-                }
-            }
-        }
-
         let be = self.entry_ptr_mut();
         unsafe {
             let first = first_ei(be, kind as i32);
             for (index, encoding) in parsed.encodings.iter().enumerate() {
                 let info = &mut *first.add(index);
-                info.precomp = &mut pairs[index];
                 info.pieces = encoding.pieces;
                 info.norm = encoding.norm;
                 info.factor = encoding.factor;
             }
-            if kind == TableType::Dtz {
-                let map = base
-                    .add(parsed.map_origin)
-                    .cast_mut()
-                    .cast::<libc::c_void>();
-                if (*be).hasPawns {
-                    let entry = &mut *(be as *mut PawnEntry);
-                    entry.dtzMap = map;
-                    for table in 0..4 {
-                        entry.dtzFlags[table] = parsed.pairs[table]
-                            .as_ref()
-                            .ok_or(LoadError::MissingOrInvalid)?
-                            .header
-                            .flags();
-                        entry.dtzMapIdx[table] = parsed.map_indices[table];
-                    }
-                } else {
-                    let entry = &mut *(be as *mut PieceEntry);
-                    entry.dtzMap = map;
-                    entry.dtzFlags = parsed.pairs[0]
-                        .as_ref()
-                        .ok_or(LoadError::MissingOrInvalid)?
-                        .header
-                        .flags();
-                    entry.dtzMapIdx = parsed.map_indices[0];
-                }
-            }
         }
-        self.pairs = pairs;
         self.parsed = Some(parsed);
         self.backing = Some(backing);
         Ok(())
@@ -2350,83 +2230,6 @@ unsafe fn encode_piece(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseE
 unsafe fn encode_pawn_f(mut p: *mut i32, mut ei: *mut EncInfo, mut be: *mut BaseEntry) -> u64 {
     encode(p, ei, be, FILE_ENC as i32)
 }
-unsafe fn decompress_pairs(mut d: *mut PairsData, mut idx: u64) -> *const u8 {
-    if (*d).idxBits == 0 {
-        return (&raw const (*d).constValue).cast::<u8>();
-    }
-    let mut mainIdx: u32 = (idx >> (*d).idxBits as i32) as u32;
-    let mut litIdx: i32 = (idx & ((1u64) << (*d).idxBits as i32).wrapping_sub(1))
-        .wrapping_sub((1) << ((*d).idxBits as i32 - 1)) as i32;
-    let mut block: u32 = 0;
-    memcpy(
-        &mut block as *mut u32 as *mut libc::c_void,
-        ((*d).indexTable).offset((6 * mainIdx) as isize) as *const libc::c_void,
-        ::core::mem::size_of::<u32>(),
-    );
-    block = u32::from_le(block);
-    let mut idxOffset: u16 =
-        *(((*d).indexTable).offset((6 * mainIdx) as isize).offset(4) as *mut u16);
-    litIdx += u16::from_le(idxOffset) as i32;
-    if litIdx < 0 {
-        while litIdx < 0 {
-            block = block.wrapping_sub(1);
-            litIdx += *((*d).sizeTable).offset(block as isize) as i32 + 1;
-        }
-    } else {
-        while litIdx > *((*d).sizeTable).offset(block as isize) as i32 {
-            let fresh26 = block;
-            block = block.wrapping_add(1);
-            litIdx -= *((*d).sizeTable).offset(fresh26 as isize) as i32 + 1;
-        }
-    }
-    let mut ptr: *mut u32 =
-        ((*d).data).offset(((block as u64) << (*d).blockSize as i32) as isize) as *mut u32;
-    let mut m: i32 = (*d).minLen as i32;
-    let mut offset: *const u16 = (*d).offset;
-    let base: *const u64 = (*d).base;
-    let mut symLen: *mut u8 = (*d).symLen;
-    let mut sym: u32 = 0;
-    let mut bitCnt: u32 = 0;
-    let mut code: u64 = u64::from_be(*(ptr as *mut u64));
-    ptr = ptr.offset(2);
-    bitCnt = 0;
-    // Index relative to the actual table starts. Forming pointers before the
-    // starts, then adding minLen back, is invalid pointer arithmetic.
-    loop {
-        let mut l: i32 = m;
-        while code < *base.offset((l - m) as isize) {
-            l += 1;
-        }
-        sym = u16::from_le(*offset.offset((l - m) as isize)) as u32;
-        sym = sym
-            .wrapping_add((code.wrapping_sub(*base.offset((l - m) as isize)) >> (64 - l)) as u32);
-        if litIdx < *symLen.offset(sym as isize) as i32 + 1 {
-            break;
-        }
-        litIdx -= *symLen.offset(sym as isize) as i32 + 1;
-        code <<= l;
-        bitCnt = bitCnt.wrapping_add(l as u32);
-        if bitCnt >= 32 {
-            bitCnt = bitCnt.wrapping_sub(32);
-            let fresh27 = ptr;
-            ptr = ptr.offset(1);
-            let mut tmp: u32 = u32::from_be(*fresh27);
-            code |= (tmp as u64) << bitCnt;
-        }
-    }
-    let mut symPat: *const u8 = (*d).symPat;
-    while *symLen.offset(sym as isize) as i32 != 0 {
-        let mut w: *const u8 = symPat.offset((3 * sym) as isize);
-        let mut s1: i32 = (*w.offset(1) as i32 & 0xf) << 8 | *w.offset(0) as i32;
-        if litIdx < *symLen.offset(s1 as isize) as i32 + 1 {
-            sym = s1 as u32;
-        } else {
-            litIdx -= *symLen.offset(s1 as isize) as i32 + 1;
-            sym = ((*w.offset(2) as i32) << 4 | *w.offset(1) as i32 >> 4) as u32;
-        }
-    }
-    symPat.offset((3 * sym) as isize)
-}
 #[inline]
 unsafe fn fill_squares(
     mut pos: *const PyrrhicPosition,
@@ -2546,6 +2349,14 @@ pub(crate) unsafe fn probe_table(
             return 0;
         }
     };
+    let Some(parsed) = table.parsed.as_ref() else {
+        *success = 0;
+        return 0;
+    };
+    let Some(backing) = table.backing.as_ref() else {
+        *success = 0;
+        return 0;
+    };
     let be = table.entry_ptr();
     let mut bside: bool = false;
     let mut flip: bool = false;
@@ -2561,9 +2372,19 @@ pub(crate) unsafe fn probe_table(
     let mut idx: u64 = 0;
     let mut t: i32 = 0;
     let mut flags: u8 = 0;
+    let pair_index: usize;
     if !(*be).hasPawns {
+        pair_index = if type_0 == WDL as i32 {
+            usize::from(bside)
+        } else {
+            0
+        };
         if type_0 == DTZ as i32 {
-            flags = (*(be as *mut PieceEntry)).dtzFlags;
+            let Some(pair) = parsed.pairs.first().and_then(Option::as_ref) else {
+                *success = 0;
+                return 0;
+            };
+            flags = pair.header.flags();
             if flags as i32 & 1 != bside as i32 && !(*be).symmetric {
                 *success = -(1);
                 return 0;
@@ -2589,8 +2410,17 @@ pub(crate) unsafe fn probe_table(
             0,
         );
         t = leading_pawn(p.as_mut_ptr(), be);
+        pair_index = if type_0 == WDL as i32 {
+            (t + 4 * bside as i32) as usize
+        } else {
+            t as usize
+        };
         if type_0 == DTZ as i32 {
-            flags = (*(be as *mut PawnEntry)).dtzFlags[t as usize];
+            let Some(pair) = parsed.pairs.get(t as usize).and_then(Option::as_ref) else {
+                *success = 0;
+                return 0;
+            };
+            flags = pair.header.flags();
             if flags as i32 & 1 != bside as i32 && !(*be).symmetric {
                 *success = -(1);
                 return 0;
@@ -2613,40 +2443,71 @@ pub(crate) unsafe fn probe_table(
         }
         idx = encode_pawn_f(p.as_mut_ptr(), ei, be);
     }
-    let mut w: *const u8 = decompress_pairs((*ei).precomp, idx);
-    if type_0 == WDL as i32 {
-        return *w.offset(0) as i32 - 2;
+    let Some(pair) = parsed.pairs.get(pair_index).and_then(Option::as_ref) else {
+        *success = 0;
+        return 0;
+    };
+    if !parsed
+        .encodings
+        .get(pair_index)
+        .is_some_and(|encoding| idx < encoding.size)
+    {
+        *success = 0;
+        return 0;
     }
-    let mut v: i32 = *w.offset(0) as i32 + ((*w.offset(1) as i32 & 0xf) << 8);
+    let Ok(decoded) = decode_pair(backing.as_slice(), pair, idx) else {
+        *success = 0;
+        return 0;
+    };
+    if type_0 == WDL as i32 {
+        return i32::from(decoded[0]) - 2;
+    }
+    let Some(wdl_index) = s
+        .checked_add(2)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|&index| index < 5)
+    else {
+        *success = 0;
+        return 0;
+    };
+    let mut v: i32 = i32::from(decoded[0]) + ((i32::from(decoded[1]) & 0xf) << 8);
     if flags as i32 & 2 != 0 {
-        let mut m: i32 = WDL_TO_MAP[(s + 2) as usize];
-        if flags as i32 & 16 == 0 {
-            v = if (*be).hasPawns as i32 != 0 {
-                *((*(be as *mut PawnEntry)).dtzMap as *mut u8).offset(
-                    ((*(be as *mut PawnEntry)).dtzMapIdx[t as usize][m as usize] as i32 + v)
-                        as isize,
-                ) as i32
-            } else {
-                *((*(be as *mut PieceEntry)).dtzMap as *mut u8)
-                    .offset(((*(be as *mut PieceEntry)).dtzMapIdx[m as usize] as i32 + v) as isize)
-                    as i32
+        let category = WDL_TO_MAP[wdl_index] as usize;
+        let Some(range) = parsed
+            .map_ranges
+            .get(t as usize)
+            .and_then(|ranges| ranges.get(category))
+        else {
+            *success = 0;
+            return 0;
+        };
+        let Some(map) = backing.as_slice().get(range.clone()) else {
+            *success = 0;
+            return 0;
+        };
+        let Some(value_index) = usize::try_from(v).ok() else {
+            *success = 0;
+            return 0;
+        };
+        if flags & 16 == 0 {
+            let Some(&value) = map.get(value_index) else {
+                *success = 0;
+                return 0;
             };
+            v = i32::from(value);
         } else {
-            v = u16::from_le(
-                (if (*be).hasPawns as i32 != 0 {
-                    *((*(be as *mut PawnEntry)).dtzMap as *mut u16).offset(
-                        ((*(be as *mut PawnEntry)).dtzMapIdx[t as usize][m as usize] as i32 + v)
-                            as isize,
-                    ) as i32
-                } else {
-                    *((*(be as *mut PieceEntry)).dtzMap as *mut u16).offset(
-                        ((*(be as *mut PieceEntry)).dtzMapIdx[m as usize] as i32 + v) as isize,
-                    ) as i32
-                }) as u16,
-            ) as i32;
+            let Some(offset) = value_index.checked_mul(2) else {
+                *success = 0;
+                return 0;
+            };
+            let Some(value) = map.get(offset..offset + 2) else {
+                *success = 0;
+                return 0;
+            };
+            v = i32::from(u16::from_le_bytes([value[0], value[1]]));
         }
     }
-    if flags as i32 & PA_FLAGS[(s + 2) as usize] as i32 == 0 || s & 1 != 0 {
+    if flags as i32 & PA_FLAGS[wdl_index] as i32 == 0 || s & 1 != 0 {
         v *= 2;
     }
     v
@@ -3044,14 +2905,12 @@ mod initialization_tests {
             assert_eq!(state.piece_entry.len(), 650);
             assert_eq!(state.pawn_entry.len(), 861);
             for entry in &state.piece_entry {
-                assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.factor[6] == 0));
                 assert!(entry.be.loaded.iter().all(|cell| cell.get().is_none()));
             }
             for entry in &state.pawn_entry {
-                assert!(entry.ei.iter().all(|info| info.precomp.is_null()));
                 assert!(entry.ei.iter().all(|info| info.pieces[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.norm[6] == 0));
                 assert!(entry.ei.iter().all(|info| info.factor[6] == 0));

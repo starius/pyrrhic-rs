@@ -240,8 +240,18 @@ impl<E: EngineAdapter> TableBases<E> {
         }
     }
 
-    /// Probe signed distance to the next zeroing move from the side to move.
-    /// This does not apply the halfmove clock.
+    /// Probe the signed DTZ50 value from the side to move without applying
+    /// the current halfmove clock.
+    ///
+    /// Zero denotes a draw. Positive values favor the side to move and negative
+    /// values favor its opponent. Magnitudes above 100 encode cursed wins or
+    /// blessed losses with a 100-ply offset, rather than an ordinary distance
+    /// to the next capture or pawn move.
+    ///
+    /// Table values can be rounded by one ply. This API returns only the signed
+    /// value and does not expose whether it is precise or rounded. Callers must
+    /// account for that uncertainty before using a value near the fifty-move
+    /// boundary as an exact search bound.
     #[allow(clippy::too_many_arguments)]
     pub fn probe_dtz(
         &self,

@@ -20,6 +20,15 @@ changes made by another process.
 and DTZ loads independently. Clone handles retain the same immutable discovery
 generation. A newly constructed handle discovers and loads its own generation.
 
+`TableBases::probe_dtz` returns a signed DTZ50 value without applying the
+current halfmove clock. Zero denotes a draw; positive values favor the side
+to move and negative values favor its opponent. Magnitudes above 100 encode
+cursed wins or blessed losses with a 100-ply offset, so they are not ordinary
+distances to the next capture or pawn move. The returned integer does not
+distinguish precise values from values rounded by one ply. Consumers must
+allow for that uncertainty before treating a result near the fifty-move
+boundary as an exact search bound.
+
 As `pyrrhic-rs` is designed to be used within an existing engine, the user must implement the `EngineAdapter` trait on a type for the probing code to be able to use the engine's own move generation code. Afterwards, `TableBases::new()` can be called using this type as a parameter.
 
 ### Example using `cozy_chess`:

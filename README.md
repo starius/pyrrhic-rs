@@ -125,3 +125,7 @@ reference executable uses GPL crates in its separate Cargo workspace. It is
 for testing only and is excluded from the library package. Full 3–5 piece
 regressions in `tools/syzygy_full_regressions.jsonl` require the complete
 table set and should be run when that set is already available.
+
+See [Full differential validation](docs/validation.md) for a reproducible
+complete-material corpus run, its evidence format, and the provenance of
+the larger comparison performed during development.
